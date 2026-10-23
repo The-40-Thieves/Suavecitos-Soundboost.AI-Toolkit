@@ -393,11 +393,13 @@ def configure_reaper_ini_bridge(
 
     raw_lines = ini_path.read_text(encoding="utf-8", errors="replace").splitlines()
 
-    # First pass: discover the existing control-surface layout inside [reaper] so we
-    # APPEND our two surfaces at the next free indices instead of overwriting the
-    # user's existing csurf_0 / csurf_1 (a Mackie surface, their own OSC rig, etc.).
+    # First pass: discover the existing control-surface layout inside [reaper].
+    # We preserve the user's own surfaces and, crucially, REUSE the slots of any
+    # SoundBoost surfaces a prior run installed (detected by value) so repeated
+    # calls are idempotent instead of appending duplicates and inflating csurf_cnt.
+    http_value = f"HTTP 0 {http_port} 'index.html' '' 0 ''"
     existing_csurf_cnt = 0
-    existing_indices: set[int] = set()
+    existing: dict[int, str] = {}
     in_sec = False
     for line in raw_lines:
         s = line.strip()
@@ -412,18 +414,34 @@ def configure_reaper_ini_bridge(
             except ValueError:
                 existing_csurf_cnt = 0
         else:
-            m = re.match(r"csurf_(\d+)=", s)
+            m = re.match(r"csurf_(\d+)=(.*)$", s)
             if m:
-                existing_indices.add(int(m.group(1)))
+                existing[int(m.group(1))] = m.group(2).strip()
 
-    # If a prior run of this function already installed our surfaces, reuse those
-    # slots; otherwise take the next two indices after whatever the user already has.
-    reserved = max(existing_csurf_cnt, (max(existing_indices) + 1) if existing_indices else 0)
-    http_idx = reserved
-    osc_idx = reserved + 1
-    new_csurf_cnt = max(existing_csurf_cnt, osc_idx + 1)
+    # Identify SoundBoost's own prior entries by value (our exact HTTP line, or any
+    # OSC surface named "SoundBoost") so we overwrite those indices in place.
+    reuse_http_idx = next((i for i, v in existing.items() if v == http_value), None)
+    reuse_osc_idx = next(
+        (i for i, v in existing.items() if v.startswith('OSC "SoundBoost"')), None
+    )
+    ours = {reuse_http_idx, reuse_osc_idx}
+    external_indices = [i for i in existing if i not in ours]
+    next_free = max(existing_csurf_cnt, (max(external_indices) + 1) if external_indices else 0)
 
-    http_line = f"csurf_{http_idx}=HTTP 0 {http_port} 'index.html' '' 0 ''"
+    if reuse_http_idx is not None:
+        http_idx = reuse_http_idx
+    else:
+        http_idx = next_free
+        next_free += 1
+    if reuse_osc_idx is not None:
+        osc_idx = reuse_osc_idx
+    else:
+        osc_idx = next_free
+        next_free += 1
+
+    new_csurf_cnt = max(existing_csurf_cnt, http_idx + 1, osc_idx + 1)
+
+    http_line = f"csurf_{http_idx}={http_value}"
     osc_line = (
         f'csurf_{osc_idx}=OSC "SoundBoost" 7 {osc_listen_port} "127.0.0.1" '
         f'{osc_send_port} 1024 10 "Default"'

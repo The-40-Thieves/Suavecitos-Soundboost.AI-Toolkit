@@ -99,8 +99,11 @@ def _bs1770_channel_weights(n_channels: int) -> np.ndarray:
     L, R, and C weight 1.0; the two surround channels (Ls, Rs) weight 1.41
     (~+1.5 dB). LFE is excluded (weight 0.0). For mono and stereo this is all
     1.0, so those measurements are unaffected.
+
+    Weights follow the conventional interleaved channel order L, R, C, LFE,
+    Ls, Rs, so LFE (index 3) is dropped and the surrounds sit at indices 4-5.
     """
-    base = [1.0, 1.0, 1.0, 1.41, 1.41, 0.0]
+    base = [1.0, 1.0, 1.0, 0.0, 1.41, 1.41]
     if n_channels <= 2:
         return np.ones(n_channels, dtype=np.float64)
     weights = [base[i] if i < len(base) else 1.0 for i in range(n_channels)]
