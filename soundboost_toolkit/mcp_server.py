@@ -83,10 +83,13 @@ mcp = FastMCP(
     "suavecitos-soundboost-toolkit",
     auth=build_mcp_oauth_provider(),
     instructions=(
-        "Suavecito's Soundboost.AI Toolkit — Complete MCP 2026-07-28 server for SoundBoost.ai "
-        "(Diktatorial Suite) cloud APIs, OAuth 2.1 + OS Keyring Vault, local ITU-R BS.1770-4 / "
-        "EBU R128 loudness & 100ms True-Peak diagnostics, 18-Band Mastering EQ rendering, "
-        "ID3v2.3/ISRC tagging, and REAPER JSFX/ReaScript integration."
+        "Suavecito's SoundBoost.ai Toolkit: an unofficial, community-built MCP server for "
+        "SoundBoost.ai, made with their permission (not the official SoundBoost MCP). "
+        "Use it to check whether a mix is release-ready (LUFS, true peak, streaming loudness "
+        "penalties), master tracks in the SoundBoost cloud, split stems and drums, read chords "
+        "and lyrics, convert formats, write release tags with ISRCs, build smart links, and "
+        "control REAPER. Only 4 tools are visible at first: call soundboost_discover_tools to "
+        "search for or unlock the rest."
     ),
 )
 

@@ -1,9 +1,11 @@
 ---
 name: suavecitos-soundboost-toolkit
-description: Unified CLI (soundboost), FastMCP Server (soundboost-mcp), OAuth 2.1 & Bearer-Token API Client, Local ITU-R BS.1770-4 / EBU R128 DSP Engine, 18-Band Mastering EQ, ID3v2.3/ISRC Tagging Engine, and Deep REAPER 7.82 (gmem/OSC/HTTP/RPP) Suite for SoundBoost.ai (Diktatorial Suite).
+description: Use when the user wants to check if a mix is release-ready, master a track, split stems or drums, get chords or lyrics, convert audio formats, tag a release with an ISRC, make a smart link, or drive REAPER, via the unofficial SoundBoost.ai toolkit (CLI soundboost, MCP server soundboost-mcp).
 ---
 
-# Suavecito's Soundboost.AI Toolkit
+# Suavecito's SoundBoost.ai Toolkit
+
+> Unofficial and community-built, made with SoundBoost's permission. Not the official SoundBoost MCP.
 
 Use this skill whenever the user wants to:
 1. Audit audio files for ITU-R BS.1770-4 Integrated/Short-Term/Momentary LUFS, Loudness Range (`LRA` via $P_{95}-P_{10}$), 4x oversampled Inter-Sample True Peak (`dBTP`) with 100ms binary-search peak timestamp localization, stereo phase correlation, or Streaming Loudness Penalties across Spotify, Apple Music, YouTube, Tidal, Amazon Music, Deezer, SoundCloud, Pandora, and Club/DJ systems.
