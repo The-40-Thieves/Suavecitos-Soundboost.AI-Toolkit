@@ -87,7 +87,7 @@ soundboost reaper-install
   "mcpServers": {
     "suavecitos-soundboost-toolkit": {
       "command": "python",
-      "args": ["E:\\Developer Box\\mcps\\suavecitos-soundboost-toolkit\\server.py"],
+      "args": ["E:\\Projects\\suavecitos-soundboost-toolkit\\server.py"],
       "env": {
         "PYTHONIOENCODING": "utf-8",
         "SOUNDBOOST_ACCESS_TOKEN": "optional-bearer-token"
