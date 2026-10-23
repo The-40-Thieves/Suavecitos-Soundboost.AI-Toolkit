@@ -1,11 +1,25 @@
-"""FastMCP Server for Suavecito's Soundboost.AI Toolkit."""
+"""FastMCP 4.1+ Server for Suavecito's Soundboost.AI Toolkit (MCP 2026-07-28 Spec).
+
+Includes:
+- Full `ToolAnnotations` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
+- Protocol-native Background Tasks (`TasksExtension` / `io.modelcontextprotocol/tasks` with `TaskConfig(mode="optional")`)
+- Real-time `Context.report_progress` notifications & optional automatic polling (`wait_for_completion`)
+- Structured MCP Resources (`soundboost://specs/...`) and Prompts (`distrokid_release_mastering_workflow`)
+"""
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
+from fastmcp.utilities.tasks import TaskConfig
+from fastmcp_tasks import TasksExtension
+from mcp.types import ToolAnnotations
 
 from soundboost_toolkit.client import SoundBoostClient
 from soundboost_toolkit.constants import (
@@ -15,6 +29,7 @@ from soundboost_toolkit.constants import (
     MASTERING_GENRE_PRESETS,
     MASTERING_MODES,
     MV_CHARACTER_REF_CAPS,
+    PRESET_EQ_CURVES_18BAND,
     STEM_PROFILES,
     STREAMING_TARGETS,
 )
@@ -44,15 +59,88 @@ from soundboost_toolkit.tagging import read_audio_tags, write_audio_tags
 mcp = FastMCP(
     "suavecitos-soundboost-toolkit",
     instructions=(
-        "Suavecito's Soundboost.AI Toolkit — Complete MCP server for SoundBoost.ai "
+        "Suavecito's Soundboost.AI Toolkit — Complete MCP 2026-07-28 server for SoundBoost.ai "
         "(Diktatorial Suite) cloud APIs, local ITU-R BS.1770-4 / EBU R128 loudness & "
         "100ms True-Peak diagnostics, 18-Band Mastering EQ rendering, ID3v2.3/ISRC tagging, "
         "and REAPER JSFX/ReaScript integration."
     ),
 )
 
+_tasks_backend_url = os.environ.get("SOUNDBOOST_TASKS_URL")
+mcp.add_extension(
+    TasksExtension(url=_tasks_backend_url) if _tasks_backend_url else TasksExtension()
+)
 
-@mcp.tool()
+
+async def _notify_progress(
+    ctx: Context | None,
+    progress: float,
+    total: float,
+    message: str,
+) -> None:
+    """Safely emit MCP progress notifications and info logs when a Context is active."""
+    if ctx is None:
+        return
+    try:
+        await ctx.report_progress(progress=progress, total=total, message=message)
+        await ctx.info(message)
+    except RuntimeError:
+        # Context may not be bound when invoked directly as a plain Python function in unit tests
+        return
+
+
+async def _poll_until_ready(
+    ctx: Context | None,
+    fetch_fn: Any,
+    *,
+    poll_interval_sec: float = 3.0,
+    max_wait_sec: float = 300.0,
+    task_label: str = "Cloud job",
+) -> dict[str, Any]:
+    """Poll a synchronous status function in a worker thread while reporting MCP progress."""
+    start_ts = time.monotonic()
+    last_res: dict[str, Any] = {}
+    while True:
+        elapsed = time.monotonic() - start_ts
+        last_res = await asyncio.to_thread(fetch_fn)
+        status_str = str(
+            last_res.get("status")
+            or last_res.get("state")
+            or (last_res.get("data") or {}).get("status")
+            or ""
+        ).lower()
+        is_ready = bool(
+            last_res.get("is_ready")
+            or last_res.get("ready")
+            or status_str in ("completed", "complete", "done", "succeeded", "success", "ready")
+        )
+        is_failed = status_str in ("failed", "error", "cancelled", "canceled")
+
+        await _notify_progress(
+            ctx,
+            min(elapsed, max_wait_sec),
+            max_wait_sec,
+            f"{task_label} status: {status_str or 'processing'} ({elapsed:.1f}s elapsed)",
+        )
+        if is_ready or is_failed or elapsed >= max_wait_sec:
+            await _notify_progress(ctx, max_wait_sec, max_wait_sec, f"{task_label} finished ({status_str or 'done'})")
+            return last_res
+        await asyncio.sleep(max(0.5, poll_interval_sec))
+
+
+# ---------------------------------------------------------------------------
+# 1. Local Offline DSP, Mastering & Tagging Tools
+# ---------------------------------------------------------------------------
+@mcp.tool(
+    tags={"dsp", "loudness", "audit"},
+    annotations=ToolAnnotations(
+        title="Audit Audio Loudness (BS.1770-4) & DistroKid Readiness",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
 def audit_audio_loudness_and_release_readiness(file_path: str) -> dict[str, Any]:
     """Run ITU-R BS.1770-4 Loudness (Integrated/Short-Term/Momentary LUFS), SoundBoost LRA (P95-P10),
     4x oversampled True Peak (dBTP) with 100ms binary-search peak timestamp, stereo correlation,
@@ -61,8 +149,18 @@ def audit_audio_loudness_and_release_readiness(file_path: str) -> dict[str, Any]
     return analyze_audio_file(file_path).to_dict()
 
 
-@mcp.tool()
-def render_local_18band_master(
+@mcp.tool(
+    tags={"dsp", "mastering", "eq"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="Render Local 18-Band Studio Master",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
+async def render_local_18band_master(
     input_path: str,
     output_path: str,
     preset: str | None = None,
@@ -72,12 +170,15 @@ def render_local_18band_master(
     true_peak_ceiling_dbtp: float = -1.0,
     bit_depth: int = 24,
     apply_tpdf_dither: bool = True,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Render a local master using SoundBoost's 18-Band Graphic EQ (20 Hz to 15 kHz or a genre preset),
     Mid/Side Stereo Width (0-200%), LUFS normalization, lookahead True-Peak brickwall limiter,
-    and 16/24-bit TPDF dithering.
+    and 16/24-bit TPDF dithering. Supports background task execution.
     """
-    return render_18band_master(
+    await _notify_progress(ctx, 10.0, 100.0, f"Starting 18-band mastering render for {Path(input_path).name}")
+    result = await asyncio.to_thread(
+        render_18band_master,
         input_path=input_path,
         output_path=output_path,
         eq_gains_db=eq_gains_db,
@@ -88,15 +189,35 @@ def render_local_18band_master(
         bit_depth=bit_depth,
         apply_tpdf_dither=apply_tpdf_dither,
     )
+    await _notify_progress(ctx, 100.0, 100.0, f"Completed master render -> {output_path}")
+    return result
 
 
-@mcp.tool()
+@mcp.tool(
+    tags={"metadata", "id3", "isrc"},
+    annotations=ToolAnnotations(
+        title="Read Audio Release Metadata & ISRC Tags",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
 def read_release_metadata_tags(file_path: str) -> dict[str, Any]:
     """Read ID3v2.3 / FLAC VorbisComment / WAV metadata tags including 12-char ISRC (TSRC), BPM, Key, Publisher, Lyrics, and Cover Art."""
     return read_audio_tags(file_path)
 
 
-@mcp.tool()
+@mcp.tool(
+    tags={"metadata", "id3", "isrc"},
+    annotations=ToolAnnotations(
+        title="Write Audio Release Metadata, ISRC & Cover Art",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
 def write_release_metadata_tags(
     file_path: str,
     title: str | None = None,
@@ -132,7 +253,16 @@ def write_release_metadata_tags(
     )
 
 
-@mcp.tool()
+@mcp.tool(
+    tags={"crypto", "auth", "protocol"},
+    annotations=ToolAnnotations(
+        title="SoundBoost AES-CBC Cipher & Token Generator",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
 def soundboost_cipher_tool(
     action: str,
     value: str = "1",
@@ -176,7 +306,16 @@ def soundboost_cipher_tool(
     raise ValueError(f"Unsupported action '{action}'")
 
 
-@mcp.tool()
+@mcp.tool(
+    tags={"music-theory", "chords", "loops"},
+    annotations=ToolAnnotations(
+        title="Transpose Chords & Quantize Musical Bar.Beat.1/16 Grid",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
 def transpose_and_quantize_musical_grid(
     chords: list[str] | None = None,
     semitones: int = 0,
@@ -210,7 +349,16 @@ def transpose_and_quantize_musical_grid(
     return res
 
 
-@mcp.tool()
+@mcp.tool(
+    tags={"music-theory", "lyrics", "lead-sheet"},
+    annotations=ToolAnnotations(
+        title="Generate Printable Chord & Lyric Lead Sheet (HTML/PDF)",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
 def generate_printable_lead_sheet(
     title: str,
     lyrics_segments: list[dict[str, Any]],
@@ -251,8 +399,21 @@ def generate_printable_lead_sheet(
     }
 
 
-@mcp.tool()
-def soundboost_upload_and_master(
+# ---------------------------------------------------------------------------
+# 2. Long-Running Cloud Tools (Background Tasks Enabled + Progress Streaming)
+# ---------------------------------------------------------------------------
+@mcp.tool(
+    tags={"cloud", "mastering", "mix-doctor"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="SoundBoost Cloud AI Mastering, Mix Doctor & Audio Enhancer",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+async def soundboost_upload_and_master(
     action: str,
     file_path: str | None = None,
     track_id: str | int | None = None,
@@ -265,8 +426,12 @@ def soundboost_upload_and_master(
     target_lufs: float | None = None,
     revision_notes: str | None = None,
     enhance_intensity: float = 0.75,
+    wait_for_completion: bool = False,
+    poll_interval_sec: float = 3.0,
+    max_wait_sec: float = 300.0,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Interact with SoundBoost Cloud AI Mastering, Mix Doctor & Audio Enhancer:
+    """Interact with SoundBoost Cloud AI Mastering, Mix Doctor & Audio Enhancer (supports Background Tasks):
     - `upload`: Upload local audio file to `POST /api/upload-audio/`
     - `master`: Run any of the 8 Mastering modes (`prompt`, `preset`, `auto`, `reference`, `chat`, `manual`, `mix_doctor`, `enhance`)
     - `status`: Poll track status and download URLs (`GET /api/tracks/{id}/`)
@@ -278,11 +443,18 @@ def soundboost_upload_and_master(
     if act == "upload":
         if not file_path:
             raise ValueError("file_path is required for action='upload'")
-        return client.upload_audio(file_path)
+        await _notify_progress(ctx, 10.0, 100.0, f"Uploading {Path(file_path).name} to SoundBoost...")
+        res = await asyncio.to_thread(client.upload_audio, file_path)
+        await _notify_progress(ctx, 100.0, 100.0, "Upload complete.")
+        return res
+
     if track_id is None:
         raise ValueError(f"track_id is required for action='{action}'")
+
     if act == "master":
-        return client.start_mastering(
+        await _notify_progress(ctx, 15.0, 100.0, f"Starting cloud mastering ({mode}) for track {track_id}...")
+        res = await asyncio.to_thread(
+            client.start_mastering,
             track_id,
             mode=mode,
             prompt=prompt,
@@ -293,17 +465,44 @@ def soundboost_upload_and_master(
             target_lufs=target_lufs,
             revision_notes=revision_notes,
         )
+        if wait_for_completion:
+            return await _poll_until_ready(
+                ctx,
+                lambda: client.get_track_status(track_id),
+                poll_interval_sec=poll_interval_sec,
+                max_wait_sec=max_wait_sec,
+                task_label=f"Cloud Mastering ({mode})",
+            )
+        await _notify_progress(ctx, 100.0, 100.0, "Cloud mastering job submitted.")
+        return res
+
     if act == "status":
-        return client.get_track_status(track_id)
+        return await asyncio.to_thread(client.get_track_status, track_id)
     if act == "mix_doctor":
-        return client.run_mix_doctor(track_id, genre=preset or "pop")
+        await _notify_progress(ctx, 20.0, 100.0, f"Running Mix Doctor on track {track_id}...")
+        res = await asyncio.to_thread(client.run_mix_doctor, track_id, preset or "pop")
+        await _notify_progress(ctx, 100.0, 100.0, "Mix Doctor analysis complete.")
+        return res
     if act == "enhance":
-        return client.run_audio_enhancer(track_id, intensity=enhance_intensity)
+        await _notify_progress(ctx, 20.0, 100.0, f"Running Audio Enhancer on track {track_id}...")
+        res = await asyncio.to_thread(client.run_audio_enhancer, track_id, enhance_intensity)
+        await _notify_progress(ctx, 100.0, 100.0, "Audio Enhancer complete.")
+        return res
     raise ValueError(f"Unsupported action '{action}'")
 
 
-@mcp.tool()
-def soundboost_studio_stems_and_drums(
+@mcp.tool(
+    tags={"cloud", "studio", "stems", "drums"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="Studio Stem Splitter, Voice Cleaner & 5-Piece Drum Kit Separator",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+async def soundboost_studio_stems_and_drums(
     action: str,
     original_id: str | int,
     profile_key: str = "standard_4stem",
@@ -313,8 +512,12 @@ def soundboost_studio_stems_and_drums(
     stem_name: str | None = None,
     loop_start_sec: float | None = None,
     loop_end_sec: float | None = None,
+    wait_for_completion: bool = False,
+    poll_interval_sec: float = 3.0,
+    max_wait_sec: float = 300.0,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Control `studio.soundboost.ai` Stem Separation, Voice Cleaner & 5-Piece Drum Kit Splitter:
+    """Control `studio.soundboost.ai` Stem Separation, Voice Cleaner & 5-Piece Drum Kit Splitter (supports Background Tasks):
     - `status`: Fetch Studio original status
     - `start_stems`: Start stem separation (`standard_2stem`, `standard_4stem`, `hifi_4stem`, `hifi_6stem`)
     - `get_stems`: Fetch separated stem URLs (`Vocals, Bass, Drums, Guitar, Piano, Other`)
@@ -326,35 +529,85 @@ def soundboost_studio_stems_and_drums(
     client = SoundBoostClient()
     act = action.strip().lower()
     if act == "status":
-        return client.get_studio_original_status(original_id, stem_variant, stem_format)
+        return await asyncio.to_thread(
+            client.get_studio_original_status, original_id, stem_variant, stem_format
+        )
     if act == "start_stems":
-        return client.start_studio_stem_split(original_id, profile_key=profile_key)
+        await _notify_progress(ctx, 10.0, 100.0, f"Starting Studio stem split ({profile_key}) for {original_id}...")
+        res = await asyncio.to_thread(client.start_studio_stem_split, original_id, profile_key)
+        if wait_for_completion:
+            return await _poll_until_ready(
+                ctx,
+                lambda: client.get_studio_stems(original_id, stem_variant=stem_variant, stem_format=stem_format),
+                poll_interval_sec=poll_interval_sec,
+                max_wait_sec=max_wait_sec,
+                task_label=f"Stem Split ({profile_key})",
+            )
+        return res
     if act == "get_stems":
-        return client.get_studio_stems(original_id, stem_variant=stem_variant, stem_format=stem_format)
+        return await asyncio.to_thread(
+            client.get_studio_stems, original_id, stem_variant, stem_format
+        )
     if act == "start_voice_clean":
-        return client.start_studio_voice_clean(original_id)
+        await _notify_progress(ctx, 10.0, 100.0, f"Starting Studio Voice Cleaner for {original_id}...")
+        res = await asyncio.to_thread(client.start_studio_voice_clean, original_id)
+        if wait_for_completion:
+            return await _poll_until_ready(
+                ctx,
+                lambda: client.get_studio_stems(original_id),
+                poll_interval_sec=poll_interval_sec,
+                max_wait_sec=max_wait_sec,
+                task_label="Voice Cleaner",
+            )
+        return res
     if act == "start_drums":
-        return client.start_studio_drum_split(original_id)
+        await _notify_progress(ctx, 10.0, 100.0, f"Starting 5-Piece Drum Kit split for {original_id}...")
+        res = await asyncio.to_thread(client.start_studio_drum_split, original_id)
+        if wait_for_completion:
+            return await _poll_until_ready(
+                ctx,
+                lambda: client.get_studio_drum_stems(original_id),
+                poll_interval_sec=poll_interval_sec,
+                max_wait_sec=max_wait_sec,
+                task_label="5-Piece Drum Kit Split",
+            )
+        return res
     if act == "get_drums":
-        return client.get_studio_drum_stems(original_id)
+        return await asyncio.to_thread(client.get_studio_drum_stems, original_id)
     if act == "handoff_to_mastering":
-        return client.handoff_studio_to_mastering(
+        await _notify_progress(ctx, 25.0, 100.0, f"Handing off Studio {handoff_source} to Mastering...")
+        return await asyncio.to_thread(
+            client.handoff_studio_to_mastering,
             original_id,
-            source_type=handoff_source,
-            stem_name=stem_name,
-            loop_start_sec=loop_start_sec,
-            loop_end_sec=loop_end_sec,
+            handoff_source,
+            stem_name,
+            loop_start_sec,
+            loop_end_sec,
         )
     raise ValueError(f"Unsupported action '{action}'")
 
 
-@mcp.tool()
-def soundboost_studio_chords_and_lyrics(
+@mcp.tool(
+    tags={"cloud", "studio", "chords", "lyrics"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="Studio AI Chord Detection & Word-Synced Lyrics",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+async def soundboost_studio_chords_and_lyrics(
     action: str,
     original_id: str | int,
     edited_segments: list[dict[str, Any]] | None = None,
+    wait_for_completion: bool = False,
+    poll_interval_sec: float = 3.0,
+    max_wait_sec: float = 180.0,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Control `studio.soundboost.ai` AI Chord Detection & Word-Synced Lyrics/Transcripts:
+    """Control `studio.soundboost.ai` AI Chord Detection & Word-Synced Lyrics/Transcripts (supports Background Tasks):
     - `start_chords`: Start beat-aligned AI Chord Recognition
     - `get_chords`: Fetch detected chords and synchronized beat timestamps
     - `start_lyrics`: Start word-level AI Lyric / Voice-Clean Transcript recognition
@@ -364,22 +617,54 @@ def soundboost_studio_chords_and_lyrics(
     client = SoundBoostClient()
     act = action.strip().lower()
     if act == "start_chords":
-        return client.start_studio_chord_analysis(original_id)
+        await _notify_progress(ctx, 10.0, 100.0, f"Starting AI Chord Recognition for {original_id}...")
+        res = await asyncio.to_thread(client.start_studio_chord_analysis, original_id)
+        if wait_for_completion:
+            return await _poll_until_ready(
+                ctx,
+                lambda: client.get_studio_chord_analysis(original_id),
+                poll_interval_sec=poll_interval_sec,
+                max_wait_sec=max_wait_sec,
+                task_label="AI Chord Analysis",
+            )
+        return res
     if act == "get_chords":
-        return client.get_studio_chord_analysis(original_id)
+        return await asyncio.to_thread(client.get_studio_chord_analysis, original_id)
     if act == "start_lyrics":
-        return client.start_studio_lyrics(original_id)
+        await _notify_progress(ctx, 10.0, 100.0, f"Starting word-level Lyric Transcription for {original_id}...")
+        res = await asyncio.to_thread(client.start_studio_lyrics, original_id)
+        if wait_for_completion:
+            return await _poll_until_ready(
+                ctx,
+                lambda: client.get_studio_lyrics(original_id),
+                poll_interval_sec=poll_interval_sec,
+                max_wait_sec=max_wait_sec,
+                task_label="AI Lyric Transcription",
+            )
+        return res
     if act == "get_lyrics":
-        return client.get_studio_lyrics(original_id)
+        return await asyncio.to_thread(client.get_studio_lyrics, original_id)
     if act == "edit_lyrics":
         if edited_segments is None:
             raise ValueError("edited_segments is required for action='edit_lyrics'")
-        return client.save_studio_lyrics_edits(original_id, edited_segments)
+        return await asyncio.to_thread(
+            client.save_studio_lyrics_edits, original_id, edited_segments
+        )
     raise ValueError(f"Unsupported action '{action}'")
 
 
-@mcp.tool()
-def soundboost_converta_audio(
+@mcp.tool(
+    tags={"cloud", "converta", "transcode"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="Converta Hi-Res Audio Format & Dither Transcoder",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=True,
+    ),
+)
+async def soundboost_converta_audio(
     action: str = "formats",
     source_id_or_url: str | None = None,
     job_id: str | None = None,
@@ -387,8 +672,12 @@ def soundboost_converta_audio(
     bit_depth: int = 24,
     sample_rate: int = 48000,
     dithering: bool = True,
+    wait_for_completion: bool = False,
+    poll_interval_sec: float = 2.0,
+    max_wait_sec: float = 180.0,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Interact with `converta.soundboost.ai` Hi-Res Audio Converter:
+    """Interact with `converta.soundboost.ai` Hi-Res Audio Converter (supports Background Tasks):
     - `formats`: Query live supported output formats, bit depths (`16/24/32`), sample rates (`44.1/48kHz`), and dithering support
     - `convert`: Start conversion job (`POST /api/v1/convert`)
     - `status`: Poll conversion job status (`GET /api/v1/status/{job_id}`)
@@ -396,25 +685,51 @@ def soundboost_converta_audio(
     client = SoundBoostClient()
     act = action.strip().lower()
     if act == "formats":
-        return client.get_converta_formats()
+        return await asyncio.to_thread(client.get_converta_formats)
     if act == "convert":
         if not source_id_or_url:
             raise ValueError("source_id_or_url is required for action='convert'")
-        return client.start_converta_conversion(
-            upload_id_or_url=source_id_or_url,
-            output_format=output_format,
-            bit_depth=bit_depth,
-            sample_rate=sample_rate,
-            dithering=dithering,
+        await _notify_progress(
+            ctx,
+            15.0,
+            100.0,
+            f"Starting Converta transcode -> {output_format} ({bit_depth}-bit / {sample_rate} Hz)",
         )
+        res = await asyncio.to_thread(
+            client.start_converta_conversion,
+            source_id_or_url,
+            output_format,
+            bit_depth,
+            sample_rate,
+            dithering,
+        )
+        cid = res.get("id") or res.get("job_id")
+        if wait_for_completion and cid:
+            return await _poll_until_ready(
+                ctx,
+                lambda: client.get_converta_status(str(cid)),
+                poll_interval_sec=poll_interval_sec,
+                max_wait_sec=max_wait_sec,
+                task_label=f"Converta ({output_format})",
+            )
+        return res
     if act == "status":
         if not job_id:
             raise ValueError("job_id is required for action='status'")
-        return client.get_converta_status(job_id)
+        return await asyncio.to_thread(client.get_converta_status, job_id)
     raise ValueError(f"Unsupported action '{action}'")
 
 
-@mcp.tool()
+@mcp.tool(
+    tags={"cloud", "smart-links", "marketing"},
+    annotations=ToolAnnotations(
+        title="Manage SoundBoost Smart Links (soundboo.st)",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
 def soundboost_smart_links(
     action: str = "list",
     link_id: str | int | None = None,
@@ -453,8 +768,18 @@ def soundboost_smart_links(
     raise ValueError(f"Unsupported action '{action}'")
 
 
-@mcp.tool()
-def soundboost_text_to_audio_and_mv_budget(
+@mcp.tool(
+    tags={"cloud", "sfx", "music-video"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="AI Text-to-Audio Generator & Music Video (h3-max) Budget Calculator",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+async def soundboost_text_to_audio_and_mv_budget(
     action: str = "mv_budget",
     prompt: str | None = None,
     duration_sec: int = 10,
@@ -462,8 +787,12 @@ def soundboost_text_to_audio_and_mv_budget(
     page: int = 1,
     quoted_credits: int = 100,
     plan_tier: str = "director",
+    wait_for_completion: bool = False,
+    poll_interval_sec: float = 1.5,
+    max_wait_sec: float = 180.0,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Generate AI Text-to-Audio / SFX or compute AI Music Video (`h3-max`) credit spending caps:
+    """Generate AI Text-to-Audio / SFX or compute AI Music Video (`h3-max`) credit spending caps (supports Background Tasks):
     - `mv_budget`: Compute exact `h3-max` retake spending cap (`ec(quote)` formula) and character reference limit (`starter/creator: 1, director: 2, studio: 3`)
     - `generate_sfx`: Start AI Text-to-Audio generation (`POST /api/audio/generate/`)
     - `sfx_status`: Poll Text-to-Audio generation status
@@ -487,23 +816,52 @@ def soundboost_text_to_audio_and_mv_budget(
     if act == "generate_sfx":
         if not prompt:
             raise ValueError("prompt is required for action='generate_sfx'")
-        return client.generate_text_to_audio(prompt=prompt, duration_sec=duration_sec)
+        await _notify_progress(ctx, 10.0, 100.0, f"Generating {duration_sec}s Text-to-Audio SFX...")
+        res = await asyncio.to_thread(client.generate_text_to_audio, prompt, duration_sec)
+        gid = res.get("id") or res.get("generation_id")
+        if wait_for_completion and gid is not None:
+            return await _poll_until_ready(
+                ctx,
+                lambda: client.get_text_to_audio_status(gid),
+                poll_interval_sec=poll_interval_sec,
+                max_wait_sec=max_wait_sec,
+                task_label="Text-to-Audio Generation",
+            )
+        return res
     if act == "sfx_status":
         if generation_id is None:
             raise ValueError("generation_id is required for action='sfx_status'")
-        return client.get_text_to_audio_status(generation_id)
+        return await asyncio.to_thread(client.get_text_to_audio_status, generation_id)
     if act == "list_public_sfx":
-        return client.list_public_text_to_audio(page=page)
+        return await asyncio.to_thread(client.list_public_text_to_audio, page)
     raise ValueError(f"Unsupported action '{action}'")
 
 
-@mcp.tool()
+@mcp.tool(
+    tags={"reaper", "daw", "jsfx"},
+    annotations=ToolAnnotations(
+        title="Install REAPER 18-Band Mastering EQ JSFX & Stem Importer ReaScript",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
 def install_reaper_jsfx_and_scripts(reaper_resource_dir: str | None = None) -> dict[str, Any]:
     """Install Suavecito's SoundBoost 18-Band Mastering EQ JSFX plugin and Multitrack Stem Importer ReaScript into REAPER."""
     return install_reaper_assets(reaper_resource_dir)
 
 
-@mcp.tool()
+@mcp.tool(
+    tags={"specs", "capabilities"},
+    annotations=ToolAnnotations(
+        title="List SoundBoost Platform Capabilities & DSP Constants",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
 def list_soundboost_platform_capabilities() -> dict[str, Any]:
     """Return the complete specification matrix of SoundBoost.ai's 18-band EQ frequencies,
     8 Mastering modes, 12 Genre presets, 4 Stem profiles, 5-Piece Drum Kit sub-stems,
@@ -541,6 +899,69 @@ def list_soundboost_platform_capabilities() -> dict[str, Any]:
             for k, v in STREAMING_TARGETS.items()
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# 3. MCP Resources & Prompts
+# ---------------------------------------------------------------------------
+@mcp.resource(
+    "soundboost://specs/capabilities",
+    name="SoundBoost Platform Capabilities Matrix",
+    description="Complete specification of 18-Band EQ frequencies, stem profiles, drum sub-stems, Converta formats, and streaming loudness targets.",
+    mime_type="application/json",
+)
+def resource_platform_capabilities() -> str:
+    return json.dumps(list_soundboost_platform_capabilities(), indent=2)
+
+
+@mcp.resource(
+    "soundboost://specs/eq-presets",
+    name="18-Band Mastering Genre EQ Curves",
+    description="Exact 18-band dB gain arrays (20 Hz to 15 kHz) for all 12 genre presets.",
+    mime_type="application/json",
+)
+def resource_eq_presets() -> str:
+    return json.dumps(
+        {
+            "frequencies_hz": list(MASTERING_EQ_FREQUENCIES_HZ),
+            "presets": {k: list(v) for k, v in PRESET_EQ_CURVES_18BAND.items()},
+        },
+        indent=2,
+    )
+
+
+@mcp.resource(
+    "soundboost://specs/reaper-jsfx",
+    name="Suavecito REAPER 18-Band Mastering EQ JSFX Source",
+    description="Source code of the REAPER JSFX 18-Band Mastering EQ, Mid/Side Stereo Width & Brickwall Ceiling Limiter plugin.",
+    mime_type="text/plain",
+)
+def resource_reaper_jsfx() -> str:
+    jsfx_path = (
+        Path(__file__).resolve().parent.parent
+        / "reaper"
+        / "Effects"
+        / "Suavecito"
+        / "SoundBoost_18Band_Mastering_EQ_Monitor.jsfx"
+    )
+    return jsfx_path.read_text(encoding="utf-8")
+
+
+@mcp.prompt(
+    name="distrokid_release_mastering_workflow",
+    description="Step-by-step release engineering workflow for auditing, cleaning stems, mastering, and tagging tracks for DistroKid.",
+)
+def prompt_distrokid_release_workflow(track_path: str, genre: str = "pop", isrc: str = "") -> str:
+    return (
+        f"Execute a complete DistroKid release engineering pass on `{track_path}` (genre: `{genre}`):\n"
+        "1. Call `audit_audio_loudness_and_release_readiness` on the source file to inspect Integrated LUFS, "
+        "LRA (P95-P10), 4x oversampled True Peak (dBTP) + 100ms peak timestamp, stereo correlation, and high-frequency roll-off.\n"
+        "2. If cymbal harshness or vocal/instrument imbalance is detected, use `soundboost_studio_stems_and_drums` "
+        "(`hifi_6stem` + `start_drums` for Kick/Snare/Toms/Hi-Hat/Cymbals) or import into REAPER via `Suavecito_SoundBoost_Stem_Import.lua`.\n"
+        f"3. Render the 24-bit / 48 kHz master using `render_local_18band_master` (preset=`{genre}`, target_lufs=-14.0, true_peak_ceiling_dbtp=-1.0, bit_depth=24, apply_tpdf_dither=True).\n"
+        "4. Re-audit the mastered file with `audit_audio_loudness_and_release_readiness` to confirm `distrokid_ready == True`.\n"
+        f"5. Embed release metadata and ISRC (`{isrc or 'CC-XXX-YY-NNNNN'}`) using `write_release_metadata_tags`."
+    )
 
 
 def main() -> None:

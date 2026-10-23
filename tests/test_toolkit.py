@@ -31,6 +31,7 @@ from soundboost_toolkit.dsp import (
     snap_timestamp_to_synchronized_beat,
     transpose_chord_symbol,
 )
+from soundboost_toolkit.mcp_server import mcp
 from soundboost_toolkit.tagging import (
     normalize_and_validate_isrc,
     read_audio_tags,
@@ -142,6 +143,43 @@ class SoundBoostToolkitTests(unittest.TestCase):
             self.assertEqual(tags["isrc"], "USABC2612345")
             read_back = read_audio_tags(out_wav)
             self.assertEqual(read_back["artist"], "Suavecito")
+
+    def test_mcp_annotations_tasks_resources_and_prompts(self) -> None:
+        import asyncio
+
+        from fastmcp import Client
+
+        async def _verify_mcp() -> None:
+            async with Client(mcp) as client:
+                tools = await client.list_tools()
+                self.assertEqual(len(tools), 15)
+                tool_map = {t.name: t for t in tools}
+
+                # Verify ToolAnnotations on all tools
+                for t in tools:
+                    self.assertIsNotNone(t.annotations, f"Missing annotations on {t.name}")
+                    self.assertTrue(bool(t.annotations.title), f"Missing title on {t.name}")
+
+                self.assertTrue(tool_map["audit_audio_loudness_and_release_readiness"].annotations.read_only_hint)
+                self.assertFalse(tool_map["audit_audio_loudness_and_release_readiness"].annotations.open_world_hint)
+                self.assertTrue(tool_map["soundboost_upload_and_master"].annotations.open_world_hint)
+
+                # Verify MCP Resources & Prompts
+                resources = await client.list_resources()
+                uris = {str(r.uri) for r in resources}
+                self.assertIn("soundboost://specs/capabilities", uris)
+                self.assertIn("soundboost://specs/eq-presets", uris)
+                self.assertIn("soundboost://specs/reaper-jsfx", uris)
+
+                prompts = await client.list_prompts()
+                prompt_names = {p.name for p in prompts}
+                self.assertIn("distrokid_release_mastering_workflow", prompt_names)
+
+                # Verify calling a tool through the MCP protocol
+                kat_res = await client.call_tool("soundboost_cipher_tool", {"action": "kat"})
+                self.assertFalse(kat_res.is_error)
+
+        asyncio.run(_verify_mcp())
 
 
 if __name__ == "__main__":

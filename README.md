@@ -25,25 +25,34 @@ This toolkit implements both **full cloud API orchestration** across all 4 Sound
 
 ---
 
-## MCP Tools (`soundboost-mcp`)
+## MCP Tools (`soundboost-mcp` — MCP `2026-07-28` Specification)
 
-| Tool | Description |
-| :--- | :--- |
-| **`audit_audio_loudness_and_release_readiness`** | Full ITU-R BS.1770-4 Integrated/Short-Term/Momentary LUFS, $P_{95}-P_{10}$ LRA, 4x oversampled True Peak (`dBTP`) + 100ms binary-search timestamp, stereo correlation, 6-band spectral profile, 9-platform streaming penalty matrix, and DistroKid readiness verdict. |
-| **`render_local_18band_master`** | Local 18-Band Mastering EQ (`20 Hz`–`15 kHz` or any of the 12 genre presets), Mid/Side stereo width (`0–200%`), target LUFS normalization, lookahead True-Peak brickwall limiter, and 16/24-bit TPDF dithering. |
-| **`read_release_metadata_tags`** | Read ID3v2.3 / FLAC / WAV metadata tags including 12-character ISRC (`TSRC`), BPM, Key, Publisher, Lyrics, and Cover Art status. |
-| **`write_release_metadata_tags`** | Write release metadata tags with ISO 3901 12-character ISRC validation (`CC-XXX-YY-NNNNN`), unsynchronized lyrics (`USLT`), and front cover art (`APIC`). |
-| **`soundboost_cipher_tool`** | Run the Studio Known-Answer Self-Test (`1 -> Hck7LVPBFsyNC95Qzf6-0Q`), encrypt/decrypt `?track=` hashes, generate `ui-api-key` + `ui-token` headers, and encrypt/decrypt `_d_a` cookies. |
-| **`transpose_and_quantize_musical_grid`** | Transpose chord progressions, classify Pitch Shift zone (`Natural zone` $\pm 3\text{ st}$ vs `Creative zone`), snap timestamps to synchronized beats (`30ms` tolerance), and quantize loops to `Bar.Beat.1/16`. |
-| **`generate_printable_lead_sheet`** | Merge word-level lyric segments and transposed chords (inserting `[Instrumental]` chord rows when vocal gaps $\ge 3.0\text{s}$) into a print-ready HTML Lead Sheet. |
-| **`soundboost_upload_and_master`** | Upload audio to `api.soundboost.ai` and run any of the 8 cloud Mastering modes (`prompt`, `preset`, `auto`, `reference`, `chat`, `manual`, `mix_doctor`, `enhance`). |
-| **`soundboost_studio_stems_and_drums`** | Start/poll Studio 2/4/6-stem separation (`htdemucs`, `htdemucs_6s`), Voice Cleaner (`Voice` + `Artifacts`), **5-Piece Drum Kit sub-stem separation** (`Kick, Snare, Toms, Hi-Hat, Cymbals`), or hand off `loop`/`stems`/`mix` to Mastering. |
-| **`soundboost_studio_chords_and_lyrics`** | Start, poll, or edit Studio AI Chord Recognition and Word-Synced Lyrics/Transcripts. |
-| **`soundboost_converta_audio`** | Query live `converta.soundboost.ai` format specs or run hi-res format conversions (`wav`, `aiff`, `flac`, `ogg`, `aac`, `m4a`, `mp3`). |
-| **`soundboost_smart_links`** | List, auto-scrape DSP metadata, create, update, and publish `https://soundboo.st/<slug>` Smart Links. |
-| **`soundboost_text_to_audio_and_mv_budget`** | Generate AI Text-to-Audio / SFX and compute AI Music Video (`h3-max`) credit spending caps (`ec(quote)` formula). |
-| **`install_reaper_jsfx_and_scripts`** | Install the 18-Band Mastering EQ JSFX plugin and Multitrack Stem Importer ReaScript into REAPER. |
-| **`list_soundboost_platform_capabilities`** | Return the complete specification matrix of EQ bands, presets, stem profiles, drum sub-stems, Converta formats, and streaming loudness targets. |
+Every tool includes full **`ToolAnnotations`** (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), semantic `tags`, and structured JSON `outputSchema`. All long-running DSP and cloud tools also register **`TasksExtension` (`io.modelcontextprotocol/tasks`)** with `task=TaskConfig(mode="optional")`, streaming live **`Context.report_progress`** notifications in both background-task and foreground execution modes.
+
+| Tool | Annotations (`readOnly` / `openWorld`) | Background Task (`task=True`) | Description |
+| :--- | :---: | :---: | :--- |
+| **`audit_audio_loudness_and_release_readiness`** | `readOnly=True`, `openWorld=False` | Sync | Full ITU-R BS.1770-4 Integrated/Short-Term/Momentary LUFS, $P_{95}-P_{10}$ LRA, 4x oversampled True Peak (`dBTP`) + 100ms binary-search timestamp, stereo correlation, 6-band spectral profile, 9-platform streaming penalty matrix, and DistroKid readiness verdict. |
+| **`render_local_18band_master`** | `readOnly=False`, `openWorld=False` | **`TaskConfig(mode="optional")`** | Local 18-Band Mastering EQ (`20 Hz`–`15 kHz` or any of the 12 genre presets), Mid/Side stereo width (`0–200%`), target LUFS normalization, lookahead True-Peak brickwall limiter, and 16/24-bit TPDF dithering. |
+| **`read_release_metadata_tags`** | `readOnly=True`, `openWorld=False` | Sync | Read ID3v2.3 / FLAC / WAV metadata tags including 12-character ISRC (`TSRC`), BPM, Key, Publisher, Lyrics, and Cover Art status. |
+| **`write_release_metadata_tags`** | `readOnly=False`, `openWorld=False` | Sync | Write release metadata tags with ISO 3901 12-character ISRC validation (`CC-XXX-YY-NNNNN`), unsynchronized lyrics (`USLT`), and front cover art (`APIC`). |
+| **`soundboost_cipher_tool`** | `readOnly=True`, `openWorld=False` | Sync | Run the Studio Known-Answer Self-Test (`1 -> Hck7LVPBFsyNC95Qzf6-0Q`), encrypt/decrypt `?track=` hashes, generate `ui-api-key` + `ui-token` headers, and encrypt/decrypt `_d_a` cookies. |
+| **`transpose_and_quantize_musical_grid`** | `readOnly=True`, `openWorld=False` | Sync | Transpose chord progressions, classify Pitch Shift zone (`Natural zone` $\pm 3\text{ st}$ vs `Creative zone`), snap timestamps to synchronized beats (`30ms` tolerance), and quantize loops to `Bar.Beat.1/16`. |
+| **`generate_printable_lead_sheet`** | `readOnly=False`, `openWorld=False` | Sync | Merge word-level lyric segments and transposed chords (inserting `[Instrumental]` chord rows when vocal gaps $\ge 3.0\text{s}$) into a print-ready HTML Lead Sheet. |
+| **`soundboost_upload_and_master`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Upload audio to `api.soundboost.ai` and run any of the 8 cloud Mastering modes (`prompt`, `preset`, `auto`, `reference`, `chat`, `manual`, `mix_doctor`, `enhance`), with optional `wait_for_completion` polling. |
+| **`soundboost_studio_stems_and_drums`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Start/poll Studio 2/4/6-stem separation (`htdemucs`, `htdemucs_6s`), Voice Cleaner (`Voice` + `Artifacts`), **5-Piece Drum Kit sub-stem separation** (`Kick, Snare, Toms, Hi-Hat, Cymbals`), or hand off `loop`/`stems`/`mix` to Mastering. |
+| **`soundboost_studio_chords_and_lyrics`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Start, poll, or edit Studio AI Chord Recognition and Word-Synced Lyrics/Transcripts. |
+| **`soundboost_converta_audio`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Query live `converta.soundboost.ai` format specs or run hi-res format conversions (`wav`, `aiff`, `flac`, `ogg`, `aac`, `m4a`, `mp3`). |
+| **`soundboost_smart_links`** | `readOnly=False`, `openWorld=True` | Sync | List, auto-scrape DSP metadata, create, update, and publish `https://soundboo.st/<slug>` Smart Links. |
+| **`soundboost_text_to_audio_and_mv_budget`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Generate AI Text-to-Audio / SFX and compute AI Music Video (`h3-max`) credit spending caps (`ec(quote)` formula). |
+| **`install_reaper_jsfx_and_scripts`** | `readOnly=False`, `openWorld=False` | Sync | Install the 18-Band Mastering EQ JSFX plugin and Multitrack Stem Importer ReaScript into REAPER. |
+| **`list_soundboost_platform_capabilities`** | `readOnly=True`, `openWorld=False` | Sync | Return the complete specification matrix of EQ bands, presets, stem profiles, drum sub-stems, Converta formats, and streaming loudness targets. |
+
+### MCP Resources & Prompts
+
+- **`soundboost://specs/capabilities`** (`application/json`): Complete platform capability matrix.
+- **`soundboost://specs/eq-presets`** (`application/json`): Exact 18-band dB gain arrays (`20 Hz` to `15 kHz`) for all 12 genre presets.
+- **`soundboost://specs/reaper-jsfx`** (`text/plain`): Source code of the REAPER `SoundBoost_18Band_Mastering_EQ_Monitor.jsfx` plugin.
+- **Prompt `distrokid_release_mastering_workflow`**: Step-by-step release engineering runbook for auditing, stem/drum-kit cleanup, 18-band mastering, and ISO 3901 ISRC tagging.
 
 ---
 
