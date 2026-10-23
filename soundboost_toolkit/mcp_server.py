@@ -53,16 +53,25 @@ from soundboost_toolkit.dsp import (
     snap_timestamp_to_synchronized_beat,
     transpose_chord_symbol,
 )
+from soundboost_toolkit.oauth import (
+    build_mcp_oauth_provider,
+    clear_vault_credentials,
+    generate_google_pkce_challenge,
+    get_vault_status,
+    run_loopback_oauth_handoff,
+    save_credentials_to_vault,
+)
 from soundboost_toolkit.reaper_integration import install_reaper_assets
 from soundboost_toolkit.tagging import read_audio_tags, write_audio_tags
 
 mcp = FastMCP(
     "suavecitos-soundboost-toolkit",
+    auth=build_mcp_oauth_provider(),
     instructions=(
         "Suavecito's Soundboost.AI Toolkit — Complete MCP 2026-07-28 server for SoundBoost.ai "
-        "(Diktatorial Suite) cloud APIs, local ITU-R BS.1770-4 / EBU R128 loudness & "
-        "100ms True-Peak diagnostics, 18-Band Mastering EQ rendering, ID3v2.3/ISRC tagging, "
-        "and REAPER JSFX/ReaScript integration."
+        "(Diktatorial Suite) cloud APIs, OAuth 2.1 + OS Keyring Vault, local ITU-R BS.1770-4 / "
+        "EBU R128 loudness & 100ms True-Peak diagnostics, 18-Band Mastering EQ rendering, "
+        "ID3v2.3/ISRC tagging, and REAPER JSFX/ReaScript integration."
     ),
 )
 
@@ -834,6 +843,73 @@ async def soundboost_text_to_audio_and_mv_budget(
         return await asyncio.to_thread(client.get_text_to_audio_status, generation_id)
     if act == "list_public_sfx":
         return await asyncio.to_thread(client.list_public_text_to_audio, page)
+    raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"oauth", "auth", "keyring", "vault"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="SoundBoost Google OAuth 2.0, OS Keyring Vault & Session Manager",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=True,
+    ),
+)
+async def soundboost_oauth_and_vault(
+    action: str = "status",
+    token_or_cookie: str | None = None,
+    email: str | None = None,
+    port: int = 8765,
+    timeout_sec: float = 120.0,
+    open_browser: bool = True,
+) -> dict[str, Any]:
+    """Manage SoundBoost OAuth 2.0, OS Keyring (`WinVaultKeyring`), and Inbound MCP OAuth 2.1:
+    - `status`: Check OS Keyring (`WinVaultKeyring`) and credential vault authentication status
+    - `pkce_url`: Generate RFC 7636 S256 PKCE Google OAuth 2.0 authorization URL (`716860248198-...`)
+    - `google_exchange`: Exchange a Google OAuth `id_token` / `access_token` at `POST /api/google-login/` and store the SoundBoost JWT in OS Keyring
+    - `save_token`: Save a SoundBoost Bearer JWT or encrypted `_d_a` cookie into OS Keyring
+    - `browser_handoff`: Launch local loopback OAuth callback server (`127.0.0.1:<port>/auth/callback`) to capture browser sign-in
+    - `logout`: Clear stored credentials from OS Keyring and `~/.soundboost/credentials.json`
+    """
+    act = action.strip().lower()
+    if act == "status":
+        return get_vault_status()
+    if act == "pkce_url":
+        pkce = generate_google_pkce_challenge(
+            redirect_uri=f"http://127.0.0.1:{port}/auth/callback"
+        )
+        return {
+            "authorize_url": pkce.authorize_url,
+            "redirect_uri": pkce.redirect_uri,
+            "state": pkce.state,
+            "code_challenge": pkce.code_challenge,
+            "code_challenge_method": "S256",
+        }
+    if act == "google_exchange":
+        if not token_or_cookie:
+            raise ValueError("token_or_cookie is required for action='google_exchange'")
+        client = SoundBoostClient()
+        return await asyncio.to_thread(client.google_oauth_login, token_or_cookie, True)
+    if act == "save_token":
+        if not token_or_cookie:
+            raise ValueError("token_or_cookie is required for action='save_token'")
+        raw = token_or_cookie.strip()
+        if raw.startswith("U2FsdGVkX1") or "%2F" in raw or "%2B" in raw:
+            dec = decrypt_cookie_value(raw)
+            if isinstance(dec, str) and dec.strip():
+                raw = dec.strip()
+        return save_credentials_to_vault(raw, email=email, auth_method="manual_vault_save")
+    if act == "browser_handoff":
+        return await asyncio.to_thread(
+            run_loopback_oauth_handoff,
+            port,
+            timeout_sec,
+            open_browser,
+        )
+    if act == "logout":
+        return clear_vault_credentials()
     raise ValueError(f"Unsupported action '{action}'")
 
 

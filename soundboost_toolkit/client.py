@@ -13,7 +13,6 @@ Covers all 4 microservices:
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from pathlib import Path
@@ -36,6 +35,7 @@ from soundboost_toolkit.crypto import (
     decrypt_param_id,
     encrypt_param_id,
 )
+from soundboost_toolkit.oauth import load_token_from_vault, save_credentials_to_vault
 
 DEFAULT_TIMEOUT_SEC = 60.0
 
@@ -68,29 +68,11 @@ class SoundBoostClient:
     ) -> str | None:
         if access_token and access_token.strip():
             return access_token.strip()
-        env_tok = os.environ.get("SOUNDBOOST_ACCESS_TOKEN", "").strip()
-        if env_tok:
-            return env_tok
-
-        cookie_raw = encrypted_da_cookie or os.environ.get("SOUNDBOOST_COOKIE_DA", "").strip()
-        if cookie_raw:
-            decrypted = decrypt_cookie_value(cookie_raw)
+        if encrypted_da_cookie and encrypted_da_cookie.strip():
+            decrypted = decrypt_cookie_value(encrypted_da_cookie.strip())
             if isinstance(decrypted, str) and decrypted.strip():
                 return decrypted.strip()
-
-        cred_file = Path.home() / ".soundboost" / "credentials.json"
-        if cred_file.exists():
-            try:
-                data = json.loads(cred_file.read_text(encoding="utf-8"))
-                if isinstance(data.get("access_token"), str) and data["access_token"].strip():
-                    return str(data["access_token"]).strip()
-                if isinstance(data.get("_d_a"), str) and data["_d_a"].strip():
-                    dec = decrypt_cookie_value(data["_d_a"])
-                    if isinstance(dec, str):
-                        return dec.strip()
-            except (OSError, ValueError, KeyError):
-                return None
-        return None
+        return load_token_from_vault()
 
     def _build_headers(
         self,
@@ -182,12 +164,43 @@ class SoundBoostClient:
         if isinstance(token, str) and token.strip():
             self.access_token = token.strip()
             if save_credentials:
-                cred_dir = Path.home() / ".soundboost"
-                cred_dir.mkdir(parents=True, exist_ok=True)
-                cred_file = cred_dir / "credentials.json"
-                cred_file.write_text(
-                    json.dumps({"email": email, "access_token": self.access_token}, indent=2),
-                    encoding="utf-8",
+                save_credentials_to_vault(
+                    self.access_token,
+                    email=email,
+                    user_id=result.get("id") or (result.get("user") or {}).get("id"),
+                    auth_method="password_login",
+                )
+        return result
+
+    def google_oauth_login(
+        self,
+        google_token: str,
+        save_credentials: bool = True,
+    ) -> dict[str, Any]:
+        """Exchange a Google OAuth 2.0 `id_token` / `access_token` / `credential` for a SoundBoost Bearer JWT (`POST /api/google-login/`)."""
+        url = f"{self.backend_url}/api/google-login/"
+        cleaned = google_token.strip()
+        payload = {
+            "token": cleaned,
+            "access_token": cleaned,
+            "id_token": cleaned,
+            "credential": cleaned,
+        }
+        result: dict[str, Any] = self._request("POST", url, json_body=payload)
+        token = (
+            result.get("access")
+            or result.get("access_token")
+            or result.get("token")
+            or (result.get("data") or {}).get("access_token")
+        )
+        if isinstance(token, str) and token.strip():
+            self.access_token = token.strip()
+            if save_credentials:
+                save_credentials_to_vault(
+                    self.access_token,
+                    email=result.get("email") or (result.get("user") or {}).get("email"),
+                    user_id=result.get("id") or (result.get("user") or {}).get("id"),
+                    auth_method="google_oauth",
                 )
         return result
 

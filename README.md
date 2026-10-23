@@ -44,6 +44,7 @@ Every tool includes full **`ToolAnnotations`** (`title`, `readOnlyHint`, `destru
 | **`soundboost_converta_audio`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Query live `converta.soundboost.ai` format specs or run hi-res format conversions (`wav`, `aiff`, `flac`, `ogg`, `aac`, `m4a`, `mp3`). |
 | **`soundboost_smart_links`** | `readOnly=False`, `openWorld=True` | Sync | List, auto-scrape DSP metadata, create, update, and publish `https://soundboo.st/<slug>` Smart Links. |
 | **`soundboost_text_to_audio_and_mv_budget`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Generate AI Text-to-Audio / SFX and compute AI Music Video (`h3-max`) credit spending caps (`ec(quote)` formula). |
+| **`soundboost_oauth_and_vault`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Manage Google OAuth 2.0 PKCE (`S256`), `POST /api/google-login/` token exchange, OS Keyring (`WinVaultKeyring` / macOS Keychain / SecretService), and local loopback browser session handoff. |
 | **`install_reaper_jsfx_and_scripts`** | `readOnly=False`, `openWorld=False` | Sync | Install the 18-Band Mastering EQ JSFX plugin and Multitrack Stem Importer ReaScript into REAPER. |
 | **`list_soundboost_platform_capabilities`** | `readOnly=True`, `openWorld=False` | Sync | Return the complete specification matrix of EQ bands, presets, stem profiles, drum sub-stems, Converta formats, and streaming loudness targets. |
 
@@ -76,6 +77,14 @@ soundboost grid --chords "Cm7,Fm7,Abmaj7,G7b9/B" --semitones -2 --flats --bpm 12
 
 # 6. Install REAPER 18-Band Mastering EQ JSFX & Multitrack Stem Importer ReaScript
 soundboost reaper-install
+
+# 7. Authenticate via Google OAuth 2.0 / Browser Loopback & Store in OS Keyring
+soundboost auth status
+soundboost auth browser-login
+soundboost auth google-exchange --token "<google-id-or-access-token>"
+
+# 8. Launch OAuth 2.1 Protected Streamable HTTP MCP Server
+soundboost serve-mcp --transport http --port 8000 --oauth google
 ```
 
 ---

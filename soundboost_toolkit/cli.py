@@ -29,6 +29,14 @@ from soundboost_toolkit.dsp import (
     transpose_chord_symbol,
 )
 from soundboost_toolkit.mcp_server import list_soundboost_platform_capabilities
+from soundboost_toolkit.oauth import (
+    build_mcp_oauth_provider,
+    clear_vault_credentials,
+    generate_google_pkce_challenge,
+    get_vault_status,
+    run_loopback_oauth_handoff,
+    save_credentials_to_vault,
+)
 from soundboost_toolkit.reaper_integration import install_reaper_assets
 from soundboost_toolkit.tagging import read_audio_tags, write_audio_tags
 
@@ -324,6 +332,87 @@ def cmd_reaper_install(
 def cmd_specs() -> None:
     """Print the full SoundBoost.ai platform capability matrix (18-band EQ, stems, drums, Converta, LUFS targets)."""
     console.print_json(data=list_soundboost_platform_capabilities())
+
+
+@app.command("auth")
+def cmd_auth(
+    action: str = typer.Argument(
+        "status",
+        help="status | pkce-url | browser-login | google-exchange | save-token | logout",
+    ),
+    token: str | None = typer.Option(
+        None,
+        "--token",
+        "-t",
+        help="Google OAuth token, SoundBoost Bearer JWT, or encrypted `_d_a` cookie",
+    ),
+    email: str | None = typer.Option(None, "--email", help="Optional account email metadata"),
+    port: int = typer.Option(8765, "--port", help="Local loopback callback port"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Do not auto-open browser"),
+) -> None:
+    """Manage SoundBoost Google OAuth 2.0, OS Keyring (`WinVaultKeyring`), and session credentials."""
+    act = action.strip().lower().replace("_", "-")
+    if act == "status":
+        console.print_json(data=get_vault_status())
+    elif act == "pkce-url":
+        pkce = generate_google_pkce_challenge(
+            redirect_uri=f"http://127.0.0.1:{port}/auth/callback"
+        )
+        console.print_json(
+            data={
+                "authorize_url": pkce.authorize_url,
+                "redirect_uri": pkce.redirect_uri,
+                "state": pkce.state,
+                "code_challenge": pkce.code_challenge,
+                "code_challenge_method": "S256",
+            }
+        )
+    elif act == "browser-login":
+        console.print_json(
+            data=run_loopback_oauth_handoff(port=port, open_browser=not no_browser)
+        )
+    elif act == "google-exchange":
+        if not token:
+            raise typer.BadParameter("--token is required for google-exchange")
+        client = SoundBoostClient()
+        console.print_json(data=client.google_oauth_login(token, save_credentials=True))
+    elif act == "save-token":
+        if not token:
+            raise typer.BadParameter("--token is required for save-token")
+        raw = token.strip()
+        if raw.startswith("U2FsdGVkX1") or "%2F" in raw or "%2B" in raw:
+            dec = decrypt_cookie_value(raw)
+            if isinstance(dec, str) and dec.strip():
+                raw = dec.strip()
+        console.print_json(
+            data=save_credentials_to_vault(raw, email=email, auth_method="cli_save_token")
+        )
+    elif act == "logout":
+        console.print_json(data=clear_vault_credentials())
+    else:
+        raise typer.BadParameter(f"Unknown auth action '{action}'")
+
+
+@app.command("serve-mcp")
+def cmd_serve_mcp(
+    transport: str = typer.Option("stdio", "--transport", help="stdio | http | sse"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind host for HTTP transport"),
+    port: int = typer.Option(8000, "--port", help="Bind port for HTTP transport"),
+    oauth: str = typer.Option(
+        "none",
+        "--oauth",
+        help="Inbound MCP OAuth 2.1 provider for HTTP: none | google | github | jwt | oauth_proxy | remote",
+    ),
+) -> None:
+    """Launch the FastMCP server over `stdio` or OAuth 2.1-protected `Streamable HTTP`."""
+    from soundboost_toolkit.mcp_server import mcp as mcp_instance
+
+    if oauth and oauth.strip().lower() != "none":
+        mcp_instance.auth = build_mcp_oauth_provider(oauth)
+    if transport.strip().lower() == "stdio":
+        mcp_instance.run(transport="stdio")
+    else:
+        mcp_instance.run(transport=transport.strip().lower(), host=host, port=port)
 
 
 if __name__ == "__main__":

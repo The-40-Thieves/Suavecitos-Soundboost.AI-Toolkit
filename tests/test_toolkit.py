@@ -32,6 +32,11 @@ from soundboost_toolkit.dsp import (
     transpose_chord_symbol,
 )
 from soundboost_toolkit.mcp_server import mcp
+from soundboost_toolkit.oauth import (
+    build_mcp_oauth_provider,
+    generate_google_pkce_challenge,
+    get_vault_status,
+)
 from soundboost_toolkit.tagging import (
     normalize_and_validate_isrc,
     read_audio_tags,
@@ -152,7 +157,7 @@ class SoundBoostToolkitTests(unittest.TestCase):
         async def _verify_mcp() -> None:
             async with Client(mcp) as client:
                 tools = await client.list_tools()
-                self.assertEqual(len(tools), 15)
+                self.assertEqual(len(tools), 16)
                 tool_map = {t.name: t for t in tools}
 
                 # Verify ToolAnnotations on all tools
@@ -163,6 +168,7 @@ class SoundBoostToolkitTests(unittest.TestCase):
                 self.assertTrue(tool_map["audit_audio_loudness_and_release_readiness"].annotations.read_only_hint)
                 self.assertFalse(tool_map["audit_audio_loudness_and_release_readiness"].annotations.open_world_hint)
                 self.assertTrue(tool_map["soundboost_upload_and_master"].annotations.open_world_hint)
+                self.assertTrue(tool_map["soundboost_oauth_and_vault"].annotations.open_world_hint)
 
                 # Verify MCP Resources & Prompts
                 resources = await client.list_resources()
@@ -179,7 +185,45 @@ class SoundBoostToolkitTests(unittest.TestCase):
                 kat_res = await client.call_tool("soundboost_cipher_tool", {"action": "kat"})
                 self.assertFalse(kat_res.is_error)
 
+                oauth_res = await client.call_tool("soundboost_oauth_and_vault", {"action": "pkce_url"})
+                self.assertFalse(oauth_res.is_error)
+
         asyncio.run(_verify_mcp())
+
+    def test_oauth_pkce_and_mcp_oauth21_providers(self) -> None:
+        pkce = generate_google_pkce_challenge()
+        self.assertIn("accounts.google.com/o/oauth2/v2/auth", pkce.authorize_url)
+        self.assertIn("code_challenge_method=S256", pkce.authorize_url)
+        self.assertTrue(len(pkce.code_verifier) >= 43)
+
+        status = get_vault_status()
+        self.assertIn("keyring_backend", status)
+
+        self.assertIsNone(build_mcp_oauth_provider("none"))
+        google_prov = build_mcp_oauth_provider(
+            "google",
+            base_url="http://127.0.0.1:8000",
+            client_id="test-client-id.apps.googleusercontent.com",
+        )
+        self.assertIsNotNone(google_prov)
+        jwt_prov = build_mcp_oauth_provider(
+            "jwt",
+            base_url="http://127.0.0.1:8000",
+            client_id="test-client-id",
+        )
+        self.assertIsNotNone(jwt_prov)
+        proxy_prov = build_mcp_oauth_provider(
+            "oauth_proxy",
+            base_url="http://127.0.0.1:8000",
+            client_id="test-client-id",
+        )
+        self.assertIsNotNone(proxy_prov)
+        remote_prov = build_mcp_oauth_provider(
+            "remote",
+            base_url="http://127.0.0.1:8000",
+            client_id="test-client-id",
+        )
+        self.assertIsNotNone(remote_prov)
 
 
 if __name__ == "__main__":
