@@ -26,6 +26,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -389,29 +390,66 @@ def configure_reaper_ini_bridge(
 
     py_dir = str(Path(sys.executable).resolve().parent)
     py_dll = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
-    http_line = f"csurf_0=HTTP 0 {http_port} 'index.html' '' 0 ''"
-    osc_line = f'csurf_1=OSC "SoundBoost" 7 {osc_listen_port} "127.0.0.1" {osc_send_port} 1024 10 "Default"'
 
-    lines = ini_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    raw_lines = ini_path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    # First pass: discover the existing control-surface layout inside [reaper] so we
+    # APPEND our two surfaces at the next free indices instead of overwriting the
+    # user's existing csurf_0 / csurf_1 (a Mackie surface, their own OSC rig, etc.).
+    existing_csurf_cnt = 0
+    existing_indices: set[int] = set()
+    in_sec = False
+    for line in raw_lines:
+        s = line.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_sec = s.lower() == "[reaper]"
+            continue
+        if not in_sec:
+            continue
+        if s.startswith("csurf_cnt="):
+            try:
+                existing_csurf_cnt = int(s.split("=", 1)[1].strip())
+            except ValueError:
+                existing_csurf_cnt = 0
+        else:
+            m = re.match(r"csurf_(\d+)=", s)
+            if m:
+                existing_indices.add(int(m.group(1)))
+
+    # If a prior run of this function already installed our surfaces, reuse those
+    # slots; otherwise take the next two indices after whatever the user already has.
+    reserved = max(existing_csurf_cnt, (max(existing_indices) + 1) if existing_indices else 0)
+    http_idx = reserved
+    osc_idx = reserved + 1
+    new_csurf_cnt = max(existing_csurf_cnt, osc_idx + 1)
+
+    http_line = f"csurf_{http_idx}=HTTP 0 {http_port} 'index.html' '' 0 ''"
+    osc_line = (
+        f'csurf_{osc_idx}=OSC "SoundBoost" 7 {osc_listen_port} "127.0.0.1" '
+        f'{osc_send_port} 1024 10 "Default"'
+    )
+
+    # Only our own keys are rewritten; the user's existing csurf_* lines are preserved.
+    our_csurf_prefixes = (f"csurf_{http_idx}=", f"csurf_{osc_idx}=")
+    skip_prefixes = ("reascript=", "pythonlibdll64=", "pythonlibpath64=", "csurf_cnt=") + our_csurf_prefixes
+
+    injected_block = [
+        "reascript=1",
+        f"pythonlibpath64={py_dir}",
+        f"pythonlibdll64={py_dll}",
+        f"csurf_cnt={new_csurf_cnt}",
+        http_line,
+        osc_line,
+    ]
+
     new_lines: list[str] = []
     in_reaper_sec = False
     injected_in_reaper = False
-
-    skip_prefixes = ("reascript=", "pythonlibdll64=", "pythonlibpath64=", "csurf_cnt=", "csurf_0=", "csurf_1=")
-    for line in lines:
+    for line in raw_lines:
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             if in_reaper_sec and not injected_in_reaper:
-                new_lines.extend(
-                    [
-                        "reascript=1",
-                        f"pythonlibpath64={py_dir}",
-                        f"pythonlibdll64={py_dll}",
-                        "csurf_cnt=2",
-                        http_line,
-                        osc_line,
-                    ]
-                )
+                new_lines.extend(injected_block)
                 injected_in_reaper = True
             in_reaper_sec = stripped.lower() == "[reaper]"
             new_lines.append(line)
@@ -422,16 +460,7 @@ def configure_reaper_ini_bridge(
         new_lines.append(line)
 
     if in_reaper_sec and not injected_in_reaper:
-        new_lines.extend(
-            [
-                "reascript=1",
-                f"pythonlibpath64={py_dir}",
-                f"pythonlibdll64={py_dll}",
-                "csurf_cnt=2",
-                http_line,
-                osc_line,
-            ]
-        )
+        new_lines.extend(injected_block)
 
     ini_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
     return {
@@ -447,8 +476,8 @@ def configure_reaper_ini_bridge(
 
 def install_reaper_assets(
     reaper_resource_dir: str | Path | None = None,
-    configure_ini_bridge: bool = True,
-    enable_startup_daemon: bool = True,
+    configure_ini_bridge: bool = False,
+    enable_startup_daemon: bool = False,
 ) -> dict[str, Any]:
     """Install the complete Suavecito SoundBoost REAPER 7.82 integration suite:
     - `Effects/Suavecito/SoundBoost_18Band_Mastering_EQ_Monitor.jsfx` (`options:gmem=SuavecitoSoundBoost`)
@@ -567,6 +596,49 @@ def build_osc_packet(address: str, *args: float | str) -> bytes:
     return _osc_pad_string(address) + _osc_pad_string("".join(type_tags)) + b"".join(arg_payloads)
 
 
+def _parse_http_control_line(parsed: dict[str, Any], tag: str, cols: list[str]) -> dict[str, Any]:
+    """Parse one line of REAPER's HTTP Web Control Surface response.
+
+    Raises ValueError/IndexError on a malformed or unexpected column layout; the
+    caller counts those and keeps going so one odd line never fails the whole query.
+    """
+    if tag == "TRANSPORT" and len(cols) >= 6:
+        parsed["transport"] = {
+            "playstate": int(cols[1]),
+            "position_sec": float(cols[2]),
+            "is_repeat_on": cols[3] == "1",
+            "position_string": cols[4],
+            "position_beats": cols[5],
+        }
+    elif tag == "BEATPOS" and len(cols) >= 6:
+        parsed["beatpos"] = {
+            "BPM": float(cols[3]) if cols[3] else 120.0,
+            "time_sig_num": int(float(cols[4])) if cols[4] else 4,
+            "time_sig_denom": int(float(cols[5])) if cols[5] else 4,
+        }
+    elif tag == "NTRACK" and len(cols) >= 2:
+        parsed["track_count"] = int(cols[1])
+    elif tag == "TRACK" and len(cols) >= 6:
+        parsed["tracks"].append(
+            {
+                "index": int(cols[1]),
+                "name": cols[2],
+                "flags": int(cols[3]),
+                "volume": float(cols[4]),
+                "pan": float(cols[5]),
+            }
+        )
+    elif tag == "MARKER" and len(cols) >= 4:
+        parsed["markers"].append({"name": cols[1], "id": cols[2], "pos_sec": float(cols[3])})
+    elif tag == "REGION" and len(cols) >= 5:
+        parsed["regions"].append(
+            {"name": cols[1], "id": cols[2], "start_sec": float(cols[3]), "end_sec": float(cols[4])}
+        )
+    elif tag == "EXTSTATE" and len(cols) >= 4:
+        parsed.setdefault("extstate", {})[f"{cols[1]}.{cols[2]}"] = cols[3]
+    return parsed
+
+
 class ReaperLiveBridge:
     """Triple-transport cross-desktop bridge to a running REAPER 7.82 instance:
     1. Loopback HTTP Web Control Surface (`http://127.0.0.1:8080/_/`)
@@ -627,43 +699,17 @@ class ReaperLiveBridge:
             }
 
         parsed: dict[str, Any] = {"reachable": True, "url": url, "tracks": [], "markers": [], "regions": []}
+        malformed = 0
         for line in text.splitlines():
             cols = line.split("\t")
             tag = cols[0] if cols else ""
-            if tag == "TRANSPORT" and len(cols) >= 6:
-                parsed["transport"] = {
-                    "playstate": int(cols[1]),
-                    "position_sec": float(cols[2]),
-                    "is_repeat_on": cols[3] == "1",
-                    "position_string": cols[4],
-                    "position_beats": cols[5],
-                }
-            elif tag == "BEATPOS" and len(cols) >= 6:
-                parsed["beatpos"] = {
-                    "BPM": float(cols[3]) if cols[3] else 120.0,
-                    "time_sig_num": int(float(cols[4])) if cols[4] else 4,
-                    "time_sig_denom": int(float(cols[5])) if cols[5] else 4,
-                }
-            elif tag == "NTRACK" and len(cols) >= 2:
-                parsed["track_count"] = int(cols[1])
-            elif tag == "TRACK" and len(cols) >= 6:
-                parsed["tracks"].append(
-                    {
-                        "index": int(cols[1]),
-                        "name": cols[2],
-                        "flags": int(cols[3]),
-                        "volume": float(cols[4]),
-                        "pan": float(cols[5]),
-                    }
-                )
-            elif tag == "MARKER" and len(cols) >= 4:
-                parsed["markers"].append({"name": cols[1], "id": cols[2], "pos_sec": float(cols[3])})
-            elif tag == "REGION" and len(cols) >= 5:
-                parsed["regions"].append(
-                    {"name": cols[1], "id": cols[2], "start_sec": float(cols[3]), "end_sec": float(cols[4])}
-                )
-            elif tag == "EXTSTATE" and len(cols) >= 4:
-                parsed.setdefault("extstate", {})[f"{cols[1]}.{cols[2]}"] = cols[3]
+            try:
+                parsed = _parse_http_control_line(parsed, tag, cols)
+            except (ValueError, IndexError):
+                malformed += 1
+                continue
+        if malformed:
+            parsed["malformed_lines"] = malformed
         return parsed
 
     def dispatch_ipc_command(

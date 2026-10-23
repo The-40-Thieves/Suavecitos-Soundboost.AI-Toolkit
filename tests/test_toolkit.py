@@ -395,7 +395,7 @@ class SoundBoostToolkitTests(unittest.TestCase):
                 artist_name="Suavecito",
             )
             self.assertEqual(album_res["total_tracks"], 2)
-            self.assertTrue(album_res["all_distrokid_ready"])
+            self.assertTrue(album_res["all_release_ready"])
 
             # Local Pitch Shift (+2 semitones) & Time Stretch (1.25x faster)
             shifted_wav = tmp_path / "shifted.wav"
@@ -483,7 +483,10 @@ class SoundBoostToolkitTests(unittest.TestCase):
             fake_ini = tmp_path / "REAPER.ini"
             fake_ini.write_text("[reaper]\nmixeruiflags=11\n[verchk]\nlastt=1\n", encoding="utf-8")
 
-            inst = install_reaper_assets(tmp_path)
+            # INI-bridge and startup daemon are now opt-in; this test exercises them explicitly.
+            inst = install_reaper_assets(
+                tmp_path, configure_ini_bridge=True, enable_startup_daemon=True
+            )
             self.assertEqual(inst["status"], "installed")
             self.assertEqual(inst["installed_fxchains_count"], 12)
             self.assertTrue((tmp_path / "Scripts" / "__startup.lua").exists())

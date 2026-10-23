@@ -75,12 +75,12 @@ def cmd_audit(
         "4x True Peak (100ms Binary Search)",
         f"{res.true_peak_dbtp:.2f} dBTP @ {res.true_peak_time_sec:.2f} s",
     )
-    metrics.add_row("Crest Factor", f"{res.crest_factor_db:.2f} dB")
+    metrics.add_row("PSR (Peak-to-Short-term Loudness)", f"{res.psr_db:.2f} dB")
     metrics.add_row("Stereo Phase Correlation", f"{res.stereo_correlation:.3f} (M/S: {res.mid_side_ratio_db:.2f} dB)")
     metrics.add_row("Estimated High-Freq Bandwidth", f"{res.estimated_bandwidth_hz:.0f} Hz")
     metrics.add_row(
-        "DistroKid Release Ready",
-        "[bold green]YES[/bold green]" if res.distrokid_ready else "[bold yellow]NEEDS MASTERING[/bold yellow]",
+        "Release Ready (toolkit heuristic)",
+        "[bold green]YES[/bold green]" if res.release_ready_heuristic else "[bold yellow]NEEDS MASTERING[/bold yellow]",
     )
     console.print(metrics)
 

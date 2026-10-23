@@ -93,6 +93,20 @@ def _design_k_weighting_sos(sample_rate: int) -> np.ndarray:
     )
 
 
+def _bs1770_channel_weights(n_channels: int) -> np.ndarray:
+    """ITU-R BS.1770-4 channel summing weights.
+
+    L, R, and C weight 1.0; the two surround channels (Ls, Rs) weight 1.41
+    (~+1.5 dB). LFE is excluded (weight 0.0). For mono and stereo this is all
+    1.0, so those measurements are unaffected.
+    """
+    base = [1.0, 1.0, 1.0, 1.41, 1.41, 0.0]
+    if n_channels <= 2:
+        return np.ones(n_channels, dtype=np.float64)
+    weights = [base[i] if i < len(base) else 1.0 for i in range(n_channels)]
+    return np.asarray(weights, dtype=np.float64)
+
+
 def _compute_windowed_lufs_series(
     k_weighted_sq: np.ndarray,
     sample_rate: int,
@@ -103,8 +117,9 @@ def _compute_windowed_lufs_series(
     win_samples = max(1, round(window_sec * sample_rate))
     step_samples = max(1, round(step_sec * sample_rate))
     total_samples = k_weighted_sq.shape[0]
+    channel_weights = _bs1770_channel_weights(k_weighted_sq.shape[1])
     if total_samples < win_samples:
-        mean_energy = float(np.sum(np.mean(k_weighted_sq, axis=0)))
+        mean_energy = float(np.sum(np.mean(k_weighted_sq, axis=0) * channel_weights))
         if mean_energy <= 1e-12:
             return np.array([-70.0], dtype=np.float64)
         return np.array([-0.691 + 10.0 * math.log10(mean_energy)], dtype=np.float64)
@@ -113,7 +128,7 @@ def _compute_windowed_lufs_series(
     starts = np.arange(0, total_samples - win_samples + 1, step_samples)
     ends = starts + win_samples
     window_means = (cumsum[ends] - cumsum[starts]) / float(win_samples)
-    summed_energy = np.sum(window_means, axis=1)
+    summed_energy = np.sum(window_means * channel_weights, axis=1)
     with np.errstate(divide="ignore"):
         lufs = np.where(summed_energy > 1e-12, -0.691 + 10.0 * np.log10(np.maximum(summed_energy, 1e-12)), -100.0)
     return lufs
@@ -196,14 +211,14 @@ class LoudnessAuditResult:
     sample_peak_dbfs: float
     true_peak_dbtp: float
     true_peak_time_sec: float
-    crest_factor_db: float
+    psr_db: float
     dc_offset: float
     stereo_correlation: float
     mid_side_ratio_db: float
     estimated_bandwidth_hz: float
     tonal_profile_db: dict[str, float]
     streaming_penalties: dict[str, dict[str, Any]]
-    distrokid_ready: bool
+    release_ready_heuristic: bool
     mix_doctor_recommendations: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -252,7 +267,9 @@ def analyze_audio_file(file_path: str | Path) -> LoudnessAuditResult:
     sample_peak_dbfs = 20.0 * math.log10(max(sample_peak_lin, 1e-12))
     true_peak_dbtp, true_peak_time_sec = locate_true_peak_timestamp_soundboost(data, sr)
 
-    crest_factor_db = float(true_peak_dbtp - short_term_max)
+    # PSR = Peak-to-Short-term-loudness Ratio (true-peak dBTP minus short-term LUFS).
+    # This intentionally mixes the dBTP and LUFS scales; it is not crest factor.
+    psr_db = float(true_peak_dbtp - short_term_max)
     dc_offset = float(np.max(np.abs(np.mean(data, axis=0))))
 
     # Stereo correlation & Mid/Side ratio
@@ -342,7 +359,10 @@ def analyze_audio_file(file_path: str | Path) -> LoudnessAuditResult:
     if not recs:
         recs.append("Track passes all loudness, True-Peak (-1.0 dBTP), phase correlation, and spectral balance checks.")
 
-    distrokid_ready = bool(
+    # Release-readiness is the toolkit's OWN heuristic, not a DistroKid requirement.
+    # DistroKid's actual intake spec is only lossless WAV/FLAC, 16-bit+, 44.1 kHz+,
+    # with no loudness or true-peak gate. These thresholds are our mastering guidance.
+    release_ready_heuristic = bool(
         sr in (44100, 48000, 88200, 96000)
         and true_peak_dbtp <= -0.8
         and -18.0 <= integrated_lufs <= -6.0
@@ -362,14 +382,14 @@ def analyze_audio_file(file_path: str | Path) -> LoudnessAuditResult:
         sample_peak_dbfs=round(sample_peak_dbfs, 2),
         true_peak_dbtp=round(true_peak_dbtp, 2),
         true_peak_time_sec=round(true_peak_time_sec, 3),
-        crest_factor_db=round(crest_factor_db, 2),
+        psr_db=round(psr_db, 2),
         dc_offset=round(dc_offset, 6),
         stereo_correlation=round(stereo_corr, 3),
         mid_side_ratio_db=round(mid_side_ratio_db, 2),
         estimated_bandwidth_hz=round(estimated_bw_hz, 1),
         tonal_profile_db=tonal_profile_db,
         streaming_penalties=penalties,
-        distrokid_ready=distrokid_ready,
+        release_ready_heuristic=release_ready_heuristic,
         mix_doctor_recommendations=recs,
     )
 
@@ -472,8 +492,6 @@ def render_18band_master(
     # 5ms lookahead max filter + 50ms release smoothing
     lookahead = max(1, int(0.005 * sr))
     release_samples = max(1, int(0.050 * sr))
-    peak_env = sg.TransferFunction([1.0], [1.0])  # placeholder for envelope
-    del peak_env
     from scipy.ndimage import maximum_filter1d
 
     max_env = maximum_filter1d(abs_env, size=lookahead * 2 + 1)
@@ -809,7 +827,7 @@ def master_album_folder(
                 "mastered_file": str(out_path),
                 "integrated_lufs": post["integrated_lufs"],
                 "true_peak_dbtp": post["true_peak_dbtp"],
-                "distrokid_ready": post["distrokid_ready"],
+                "release_ready_heuristic": post["release_ready_heuristic"],
             }
         )
 
@@ -825,7 +843,7 @@ def master_album_folder(
         "album_mean_lufs": round(float(np.mean(lufs_values)), 2),
         "album_lufs_spread_lu": round(float(np.max(lufs_values) - np.min(lufs_values)), 2),
         "album_max_true_peak_dbtp": round(float(np.max(tp_values)), 2),
-        "all_distrokid_ready": all(bool(t["distrokid_ready"]) for t in track_results),
+        "all_release_ready": all(bool(t["release_ready_heuristic"]) for t in track_results),
         "tracks": track_results,
     }
 
@@ -1118,8 +1136,10 @@ def render_local_pitch_and_time_stretch(
     for ch in range(samples.shape[1]):
         ch_stretched = _phase_vocoder_time_stretch_channel(samples[:, ch], vocoder_rate)
         if abs(pitch_factor - 1.0) > 1e-4:
-            up = 1000
-            down = max(1, round(1000.0 * pitch_factor))
+            # Wider rational base keeps the resample ratio within ~0.01 cents of
+            # the exact 2^(st/12) pitch factor for arbitrary (non-12-TET) shifts.
+            up = 48000
+            down = max(1, round(48000.0 * pitch_factor))
             ch_out = sg.resample_poly(ch_stretched, up=up, down=down)
         else:
             ch_out = ch_stretched
