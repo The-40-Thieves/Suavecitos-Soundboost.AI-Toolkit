@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from soundboost_toolkit.constants import (
+    ACCOUNT_TIER_ENTITLEMENTS,
     BACKEND_URL,
     CONVERTA_FORMATS,
     CONVERTA_URL,
@@ -79,6 +80,8 @@ class SoundBoostClient:
 
         self.guest_token = guest_token or os.environ.get("SOUNDBOOST_GUEST_TOKEN")
         self.access_token = self._resolve_access_token(access_token, encrypted_da_cookie)
+        self.account_tier: str | None = os.environ.get("SOUNDBOOST_ACCOUNT_TIER")
+        self.cached_entitlements: dict[str, Any] | None = None
         self.storage_proxy_host: str | None = None
         self.storage_direct_host: str | None = None
 
@@ -149,6 +152,151 @@ class SoundBoostClient:
             "Sign in first via `soundboost auth browser-login`, `soundboost auth google-exchange --token <token>`, "
             "or `soundboost_oauth_and_vault(action='browser_handoff')` so requests authenticate against your SoundBoost account and subscription."
         )
+
+    @staticmethod
+    def resolve_account_entitlements(
+        billing_or_user_payload: dict[str, Any] | None = None,
+        *,
+        is_authenticated: bool = False,
+        override_tier: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a user's exact SoundBoost account tier and unlocked feature flags from `/api/billing/info` or `/api/account/profile/`.
+
+        Mirrors SoundBoost's exact client-side entitlement functions (`N(e)`, `S(e)`, `P(e)` in `_app` and Studio `Module 584`):
+        - `free`: Free tools (`audit`, `tags`, `converta`), Studio standard 2/4-stem + chords/lyrics, Smart Links, 30s mastering preview.
+        - `pay_as_you_go`: Credit-backed full-length mastering downloads, Studio stem exports, 480P MV.
+        - `unlimited`: Unlimited full-length mastering & revisions, Studio pitch/time stem export, Shoots AI Clones.
+        - `unlimited_plus`: Unlocks **Bulk Mastering** (`/api/bulk-mastering/*`), **Studio Hi-Fi 4-Stem (`hifi_4stem`), 6-Stem (`hifi_6stem`), and 5-Piece Drum Kit Splitter** (`requires_plus=True`), Auto-QC, and Deep Research.
+        - `starter` / `creator` / `director` / `studio`: Shoots & AI Music Video (`h3-max`) tiers (`director` & `studio` unlock Auto-QC + Bulk Mastering; `studio` unlocks Deep Research + 3 character refs).
+        """
+        data = billing_or_user_payload or {}
+        raw_plan = str(
+            override_tier
+            or data.get("plan")
+            or data.get("subscription_plan")
+            or data.get("tier")
+            or data.get("user_type")
+            or ""
+        ).strip().lower()
+        sub_status = str(data.get("subscription_status") or data.get("status") or "").strip().lower()
+        is_frozen = bool(data.get("frozen", False))
+        credits = int(data.get("credits") or data.get("credit_balance") or data.get("video_credits") or 0)
+        is_unlimited_flag = bool(data.get("unlimited") or data.get("is_unlimited"))
+        is_plus_flag = bool(
+            data.get("unlimited_plus")
+            or data.get("is_plus")
+            or data.get("has_plus_access")
+            or "plus" in raw_plan
+        )
+
+        # Normalize plan identifier (e.g. "unlimited_plus_monthly" -> "unlimited_plus", "director_annual" -> "director")
+        normalized_tier = "free"
+        if raw_plan in ACCOUNT_TIER_ENTITLEMENTS and raw_plan != "free":
+            normalized_tier = raw_plan
+        elif "unlimited_plus" in raw_plan or is_plus_flag:
+            normalized_tier = "unlimited_plus"
+        elif "unlimited" in raw_plan or is_unlimited_flag:
+            normalized_tier = "unlimited"
+        elif "studio" in raw_plan or "tier_4" in raw_plan or "tier_3" in raw_plan:
+            normalized_tier = "studio"
+        elif "director" in raw_plan or "tier_2" in raw_plan:
+            normalized_tier = "director"
+        elif "creator" in raw_plan:
+            normalized_tier = "creator"
+        elif "starter" in raw_plan or "tier_1" in raw_plan:
+            normalized_tier = "starter"
+        elif is_authenticated and credits > 0:
+            normalized_tier = "pay_as_you_go"
+
+        # If subscription is explicitly frozen or cancelled/expired without credits, downgrade to free
+        if is_frozen or (sub_status in ("canceled", "cancelled", "unpaid", "incomplete_expired") and credits <= 0):
+            normalized_tier = "free"
+
+        base_spec = dict(ACCOUNT_TIER_ENTITLEMENTS.get(normalized_tier, ACCOUNT_TIER_ENTITLEMENTS["free"]))
+
+        # Apply explicit `plan_tools` overrides if returned by `/api/billing/info` (Function P(e))
+        plan_tools = data.get("plan_tools")
+        if isinstance(plan_tools, dict):
+            if "qc" in plan_tools:
+                base_spec["mv_auto_qc"] = bool(plan_tools["qc"])
+            if "research" in plan_tools:
+                base_spec["mv_deep_research"] = bool(plan_tools["research"])
+
+        # Build list of unlocked Studio stem profiles for this exact tier
+        plus_unlocked = bool(base_spec.get("studio_hifi_plus_stems_unlocked"))
+        unlocked_stem_profiles = [
+            k for k, v in STEM_PROFILES.items() if (not v.requires_plus) or plus_unlocked
+        ]
+
+        return {
+            **base_spec,
+            "resolved_tier": normalized_tier,
+            "raw_plan": raw_plan or normalized_tier,
+            "subscription_status": sub_status or ("active" if normalized_tier != "free" else "free"),
+            "frozen": is_frozen,
+            "credits": credits,
+            "unlocked_studio_stem_profiles": unlocked_stem_profiles,
+            "drum_kit_5piece_unlocked": plus_unlocked,
+            "studio_5piece_drum_kit_unlocked": plus_unlocked,
+            "mv_auto_qc_unlocked": bool(base_spec.get("mv_auto_qc")),
+            "mv_deep_research_unlocked": bool(base_spec.get("mv_deep_research")),
+            "entitlements": {
+                **base_spec,
+                "studio_5piece_drum_kit_unlocked": plus_unlocked,
+                "mv_auto_qc_unlocked": bool(base_spec.get("mv_auto_qc")),
+                "mv_deep_research_unlocked": bool(base_spec.get("mv_deep_research")),
+            },
+        }
+
+    def get_my_entitlements(self, force_refresh: bool = False) -> dict[str, Any]:
+        """Fetch and resolve the authenticated user's live SoundBoost account tier and unlocked feature matrix."""
+        if not force_refresh and self.cached_entitlements is not None:
+            return self.cached_entitlements
+
+        if not (self.access_token and self.access_token.strip()):
+            resolved = self.resolve_account_entitlements(
+                is_authenticated=False,
+                override_tier=self.account_tier,
+            )
+            self.cached_entitlements = resolved
+            return resolved
+
+        billing_data: dict[str, Any] = {}
+        if not self.account_tier:
+            try:
+                billing_data = self.get_billing_info()
+            except httpx.HTTPError:
+                billing_data = {}
+
+        resolved = self.resolve_account_entitlements(
+            billing_data,
+            is_authenticated=True,
+            override_tier=self.account_tier,
+        )
+        self.cached_entitlements = resolved
+        return resolved
+
+    def require_feature_entitlement(
+        self,
+        feature_key: str,
+        feature_label: str = "",
+        *,
+        endpoint: str = "",
+    ) -> dict[str, Any]:
+        """Verify that the user's current account level unlocks `feature_key` before calling a tier-gated endpoint."""
+        label = feature_label or endpoint or feature_key
+        self.require_authenticated(label)
+        ent = self.get_my_entitlements()
+        # If no local tier override and billing endpoint wasn't reachable yet, let the backend validate the Bearer JWT directly
+        if ent.get("raw_plan") == "free" and not self.account_tier and ent.get("subscription_status") == "free":
+            return ent
+        if not ent.get(feature_key, False):
+            current_tier = ent.get("tier", "free")
+            raise SoundBoostPayGateError(
+                f"Account tier '{current_tier}' does not unlock '{label}' (`{feature_key}=False`). "
+                "Upgrade your SoundBoost plan (`unlimited_plus`, `creator`, `director`, or `studio`) to unlock this feature."
+            )
+        return ent
 
     def _request(
         self,
@@ -377,6 +525,11 @@ class SoundBoostClient:
         if profile_key not in STEM_PROFILES:
             raise ValueError(f"Unknown profile '{profile_key}'. Valid: {sorted(STEM_PROFILES)}")
         spec = STEM_PROFILES[profile_key]
+        if spec.requires_plus:
+            self.require_feature_entitlement(
+                "studio_hifi_plus_stems_unlocked",
+                f"Studio Hi-Fi Stem Separation ({profile_key})",
+            )
         body = {
             "chunk_profile": chunk_profile,
             "stem_variant": spec.stem_variant,
@@ -427,6 +580,10 @@ class SoundBoostClient:
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Start 5-Piece Drum Kit sub-stem separation (`Kick`, `Snare`, `Toms`, `Hi-Hat`, `Cymbals`, Module 618)."""
+        self.require_feature_entitlement(
+            "studio_hifi_plus_stems_unlocked",
+            "Studio 5-Piece Drum Kit Sub-Stem Splitter",
+        )
         body = {"chunk_profile": chunk_profile, **(options or {})}
         url = f"{self.backend_url}/api/studio/originals/{original_id}/drums/start/"
         return dict(self._request("POST", url, json_body=body))
@@ -485,6 +642,10 @@ class SoundBoostClient:
         export_payload: dict[str, Any],
     ) -> dict[str, Any]:
         """Export stems or custom mix (`POST /api/studio/originals/{id}/export/`, Module 618)."""
+        self.require_feature_entitlement(
+            "studio_pitch_time_export_unlocked",
+            endpoint="/api/studio/originals/{id}/export/",
+        )
         url = f"{self.backend_url}/api/studio/originals/{original_id}/export/"
         return dict(self._request("POST", url, json_body=export_payload))
 
@@ -570,6 +731,10 @@ class SoundBoostClient:
 
     def request_converta_stem_export(self, export_spec: dict[str, Any]) -> dict[str, Any]:
         """Request pitched/time-stretched stem or loop export via `POST https://converta.soundboost.ai/api/v1/stem-export` (Module 620)."""
+        self.require_feature_entitlement(
+            "studio_pitch_time_export_unlocked",
+            endpoint="/api/v1/stem-export",
+        )
         url = f"{self.converta_url}/api/v1/stem-export"
         return dict(self._request("POST", url, json_body=export_spec))
 
@@ -649,7 +814,11 @@ class SoundBoostClient:
         target_lufs: float | None = None,
         reference_track_id: int | str | None = None,
     ) -> dict[str, Any]:
-        """Start batch album/EP mastering (`POST /api/bulk-mastering/start/`)."""
+        """Start batch album/EP mastering (`POST /api/bulk-mastering/start/`, requires Unlimited Plus / Director / Studio tier)."""
+        self.require_feature_entitlement(
+            "bulk_mastering_unlocked",
+            "Bulk / Album Mastering (/api/bulk-mastering/start/)",
+        )
         payload: dict[str, Any] = {
             "track_ids": [str(tid) for tid in track_ids],
             "mode": mode,
@@ -827,8 +996,19 @@ class SoundBoostClient:
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Trigger batch scene/shot regeneration & Auto-QC retakes (`POST /api/shoots/{id}/scenes/regenerate-all`)."""
+        opts = options or {}
+        if opts.get("auto_qc") or opts.get("qc"):
+            self.require_feature_entitlement(
+                "mv_auto_qc_unlocked",
+                endpoint=f"/api/shoots/{shoot_id}/scenes/regenerate-all",
+            )
+        if opts.get("deep_research") or opts.get("research"):
+            self.require_feature_entitlement(
+                "mv_deep_research_unlocked",
+                endpoint=f"/api/shoots/{shoot_id}/scenes/regenerate-all",
+            )
         url = f"{self.mastering_url}/api/shoots/{shoot_id}/scenes/regenerate-all"
-        return dict(self._request("POST", url, json_body=options or {}))
+        return dict(self._request("POST", url, json_body=opts))
 
     def list_video_clips(self) -> Any:
         """List short-form vertical video clips / Spotify 9:16 Canvas exports (`GET /api/video-clips/`)."""
@@ -891,6 +1071,10 @@ class SoundBoostClient:
 
     def get_song_download(self, song_id: int | str, fmt: str = "wav") -> dict[str, Any]:
         """Fetch signed download link for a mastered song (`GET /api/songs/{id}/download`)."""
+        self.require_feature_entitlement(
+            "mastering_full_length_download",
+            endpoint=f"/api/songs/{song_id}/download",
+        )
         url = f"{self.backend_url}/api/songs/{song_id}/download"
         return dict(self._request("GET", url, params={"format": fmt}))
 
@@ -1009,4 +1193,19 @@ class SoundBoostClient:
         """Fetch artist referral code and reward telemetry (`GET /api/get-referral-info`)."""
         url = f"{self.backend_url}/api/get-referral-info"
         return dict(self._request("GET", url))
+
+
+def resolve_account_entitlements(
+    billing_or_user_payload: dict[str, Any] | None = None,
+    *,
+    is_authenticated: bool = True,
+    override_tier: str | None = None,
+) -> dict[str, Any]:
+    """Module-level helper for `SoundBoostClient.resolve_account_entitlements`."""
+    return SoundBoostClient.resolve_account_entitlements(
+        billing_or_user_payload,
+        is_authenticated=is_authenticated,
+        override_tier=override_tier,
+    )
+
 

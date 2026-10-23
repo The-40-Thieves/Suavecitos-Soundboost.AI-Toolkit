@@ -23,6 +23,7 @@ from mcp.types import ToolAnnotations
 
 from soundboost_toolkit.client import SoundBoostClient
 from soundboost_toolkit.constants import (
+    ACCOUNT_TIER_ENTITLEMENTS,
     CONVERTA_FORMATS,
     DRUM_KIT_SUBSTEMS,
     MASTERING_EQ_FREQUENCIES_HZ,
@@ -932,6 +933,7 @@ def list_soundboost_platform_capabilities() -> dict[str, Any]:
             }
             for k, v in STREAMING_TARGETS.items()
         },
+        "account_tier_entitlements": ACCOUNT_TIER_ENTITLEMENTS,
     }
 
 
@@ -1363,6 +1365,8 @@ def soundboost_account_profile_and_billing(
     - `unread_count`: Get unread notification count (`GET /api/social/notifications/unread-count/`)
     - `mark_read`: Mark notifications read (`POST /api/social/notifications/read/`)
     - `billing_info`: Fetch subscription, credit balance & billing details (`GET /api/billing/info`)
+    - `entitlements`: Resolve the exact SoundBoost account level (`free`, `pay_as_you_go`, `unlimited`, `unlimited_plus`, `starter`, `creator`, `director`, `studio`) and unlocked feature matrix for the authenticated user
+    - `all_tiers`: Return the full SoundBoost account-level entitlement matrix (`ACCOUNT_TIER_ENTITLEMENTS`)
     - `products`: List available subscription plans & credit packs (`GET /api/products/`)
     - `checkout_session`: Create Stripe checkout session (`POST /api/create-checkout-session`)
     - `portal_session`: Create Stripe customer billing portal session (`POST /api/create-customer-portal-session/`)
@@ -1372,6 +1376,10 @@ def soundboost_account_profile_and_billing(
     """
     client = SoundBoostClient()
     act = action.strip().lower()
+    if act == "entitlements":
+        return client.get_my_entitlements()
+    if act in {"all_tiers", "tiers"}:
+        return {"account_tier_entitlements": ACCOUNT_TIER_ENTITLEMENTS}
     if act == "get_profile":
         return client.get_account_profile()
     if act == "update_profile":

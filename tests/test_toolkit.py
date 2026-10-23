@@ -10,8 +10,16 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from soundboost_toolkit.client import SoundBoostClient, SoundBoostPayGateError
-from soundboost_toolkit.constants import PRODUCTION_KAT_HASH, PRODUCTION_KAT_ID
+from soundboost_toolkit.client import (
+    SoundBoostClient,
+    SoundBoostPayGateError,
+    resolve_account_entitlements,
+)
+from soundboost_toolkit.constants import (
+    ACCOUNT_TIER_ENTITLEMENTS,
+    PRODUCTION_KAT_HASH,
+    PRODUCTION_KAT_ID,
+)
 from soundboost_toolkit.crypto import (
     compute_mv_spending_limit,
     decrypt_cookie_value,
@@ -229,6 +237,74 @@ class SoundBoostToolkitTests(unittest.TestCase):
             unauth_client.start_studio_stem_split(42, "hifi_6stem")
         with self.assertRaises(SoundBoostPayGateError):
             unauth_client.request_converta_stem_export({"semitones": 2})
+
+    def test_account_tier_entitlements_and_feature_unlocking(self) -> None:
+        self.assertEqual(len(ACCOUNT_TIER_ENTITLEMENTS), 8)
+
+        # 1. Free tier: unlocks standard 2/4-stem, voice_clean, chords/lyrics, 30s preview; blocks full download, bulk mastering, hifi 6-stem
+        free_ent = resolve_account_entitlements({"tier": "free", "credits": 0})
+        self.assertEqual(free_ent["resolved_tier"], "free")
+        self.assertTrue(free_ent["entitlements"]["studio_standard_stems_unlocked"])
+        self.assertFalse(free_ent["entitlements"]["mastering_full_length_download"])
+        self.assertFalse(free_ent["entitlements"]["bulk_mastering_unlocked"])
+        self.assertFalse(free_ent["entitlements"]["studio_hifi_plus_stems_unlocked"])
+
+        # 2. Pay-As-You-Go with credits > 0: unlocks full download and pitch/time stem export, blocks bulk mastering & hifi 6-stem
+        payg_ent = resolve_account_entitlements({"tier": "free", "credits": 3})
+        self.assertEqual(payg_ent["resolved_tier"], "pay_as_you_go")
+        self.assertTrue(payg_ent["entitlements"]["mastering_full_length_download"])
+        self.assertTrue(payg_ent["entitlements"]["studio_pitch_time_export_unlocked"])
+        self.assertFalse(payg_ent["entitlements"]["bulk_mastering_unlocked"])
+
+        # 3. Unlimited: unlocks unlimited downloads & Shoots AI Clones, still blocks Bulk Mastering & Studio Hi-Fi Plus Stems
+        unlim_ent = resolve_account_entitlements({"plan": "unlimited_monthly", "subscription_status": "active"})
+        self.assertEqual(unlim_ent["resolved_tier"], "unlimited")
+        self.assertTrue(unlim_ent["entitlements"]["mastering_unlimited_revisions"])
+        self.assertTrue(unlim_ent["entitlements"]["shoots_ai_clones_unlocked"])
+        self.assertFalse(unlim_ent["entitlements"]["bulk_mastering_unlocked"])
+        self.assertFalse(unlim_ent["entitlements"]["studio_hifi_plus_stems_unlocked"])
+
+        # 4. Unlimited Plus: unlocks Bulk Mastering, Hi-Fi 4/6-stem, 5-Piece Drum Kit, Auto-QC & Deep Research
+        plus_ent = resolve_account_entitlements({"plan": "unlimited_plus_annual", "subscription_status": "active"})
+        self.assertEqual(plus_ent["resolved_tier"], "unlimited_plus")
+        self.assertTrue(plus_ent["entitlements"]["bulk_mastering_unlocked"])
+        self.assertTrue(plus_ent["entitlements"]["studio_hifi_plus_stems_unlocked"])
+        self.assertTrue(plus_ent["entitlements"]["studio_5piece_drum_kit_unlocked"])
+        self.assertTrue(plus_ent["entitlements"]["mv_auto_qc_unlocked"])
+        self.assertTrue(plus_ent["entitlements"]["mv_deep_research_unlocked"])
+
+        # 5. Director vs Studio tiers: character ref caps (2 vs 3) and Auto-QC vs Deep Research
+        dir_ent = resolve_account_entitlements({"plan": "director_monthly", "subscription_status": "active"})
+        self.assertEqual(dir_ent["resolved_tier"], "director")
+        self.assertEqual(dir_ent["entitlements"]["mv_character_ref_cap"], 2)
+        self.assertTrue(dir_ent["entitlements"]["mv_auto_qc_unlocked"])
+        self.assertFalse(dir_ent["entitlements"]["mv_deep_research_unlocked"])
+
+        studio_ent = resolve_account_entitlements({"plan": "studio_annual", "subscription_status": "active"})
+        self.assertEqual(studio_ent["resolved_tier"], "studio")
+        self.assertEqual(studio_ent["entitlements"]["mv_character_ref_cap"], 3)
+        self.assertTrue(studio_ent["entitlements"]["mv_auto_qc_unlocked"])
+        self.assertTrue(studio_ent["entitlements"]["mv_deep_research_unlocked"])
+
+        # 6. Frozen account downgrades to free entitlements
+        frozen_ent = resolve_account_entitlements({"plan": "studio_annual", "frozen": True, "credits": 50})
+        self.assertEqual(frozen_ent["resolved_tier"], "free")
+        self.assertFalse(frozen_ent["entitlements"]["mastering_full_length_download"])
+
+        # 7. Verify SoundBoostClient enforces exact account tier before calling endpoints
+        client = SoundBoostClient(access_token="valid-jwt-token")
+        client.cached_entitlements = unlim_ent  # Authenticated on 'unlimited' (not 'unlimited_plus')
+        with self.assertRaises(SoundBoostPayGateError):
+            client.start_studio_stem_split(42, "hifi_6stem")
+        with self.assertRaises(SoundBoostPayGateError):
+            client.start_studio_drum_split(42)
+        with self.assertRaises(SoundBoostPayGateError):
+            client.start_bulk_mastering([1, 2])
+
+        # Upgrading the client's resolved account level to 'unlimited_plus' unlocks those exact features
+        client.cached_entitlements = plus_ent
+        unlocked = client.require_feature_entitlement("studio_hifi_plus_stems_unlocked")
+        self.assertEqual(unlocked["resolved_tier"], "unlimited_plus")
 
     def test_new_gap_clusters_voicings_shifter_album_and_mp3_inspector(self) -> None:
         # 1. Chord Voicing Diagrams (Module 534: Guitar, Ukulele, Piano)

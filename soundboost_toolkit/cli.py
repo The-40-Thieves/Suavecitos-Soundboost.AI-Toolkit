@@ -607,15 +607,21 @@ def cmd_shoots(
 @app.command("account")
 def cmd_account(
     action: str = typer.Argument(
-        "billing",
-        help="profile | billing | products | notifications | unread | referral | check-username",
+        "entitlements",
+        help="entitlements | tiers | profile | billing | products | notifications | unread | referral | check-username",
     ),
     username: str | None = typer.Option(None, "--username", "-u", help="Username to inspect or check"),
 ) -> None:
-    """Inspect SoundBoost Artist Profile, Social Notifications, Referrals & Subscription Billing."""
+    """Inspect SoundBoost Account-Level Entitlements, Artist Profile, Notifications, Referrals & Subscription Billing."""
     client = SoundBoostClient()
     act = action.strip().lower().replace("_", "-")
-    if act == "profile":
+    if act == "entitlements":
+        res = client.get_my_entitlements()
+    elif act in {"tiers", "all-tiers"}:
+        from soundboost_toolkit.constants import ACCOUNT_TIER_ENTITLEMENTS
+
+        res = {"account_tier_entitlements": ACCOUNT_TIER_ENTITLEMENTS}
+    elif act == "profile":
         res = client.get_public_artist_profile(username) if username else client.get_account_profile()
     elif act == "billing":
         res = client.get_billing_info()
