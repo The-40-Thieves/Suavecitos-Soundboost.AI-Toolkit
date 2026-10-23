@@ -1,145 +1,231 @@
-# Suavecito's Soundboost.AI Toolkit
+# Suavecito's SoundBoost.ai Toolkit
 
-Unified **CLI (`soundboost`)**, **FastMCP Server (`soundboost-mcp`)**, **OAuth 2.1 & Bearer-Token API Client**, **Local ITU-R BS.1770-4 / EBU R128 DSP Engine**, **ID3v2.3 & ISO 3901 ISRC Tagging Engine**, and **REAPER JSFX / ReaScript Suite** for the **SoundBoost.ai (`Diktatorial Suite`)** ecosystem.
+**Master, split, tag, and ship your tracks from the terminal, your AI agent, or straight out of REAPER.**
 
-No embedded LLM, no hardcoded personal credentials, no telemetry: **the caller is the model**.
+A CLI, an MCP server, and a REAPER suite for [SoundBoost.ai](https://soundboost.ai), plus a local DSP engine that does the release-prep grunt work offline for free.
 
----
-
-## Architecture & Ecosystem Coverage
-
-This toolkit implements both **full cloud API orchestration** across all 4 SoundBoost microservices (`api.soundboost.ai`, `mastering.soundboost.ai`, `studio.soundboost.ai`, `converta.soundboost.ai`, plus `shoots.soundboost.ai` SSO) and **100% offline local studio DSP equivalents**:
-
-| Subsystem | Cloud API / Microservice | Local Offline DSP / Protocol Equivalent |
-| :--- | :--- | :--- |
-| **8-Mode AI Mastering & 18-Band EQ** | `POST /api/tracks/{id}/master/` (`prompt`, `preset`, `auto`, `reference`, `chat`, `manual`, `mix_doctor`, `enhance`) | RBJ constant-$Q$ 18-band biquad cascade (`20, 30, 45, 70, 100, 140, 200, 315, 500, 700, 1000, 1400, 2000, 3150, 5000, 7000, 10000, 15000 Hz`, $\pm 6.0\text{ dB}$), Mid/Side stereo width (`0–200%`), lookahead True-Peak brickwall limiter, and 16/24-bit TPDF dither |
-| **Multitrack Stem Studio & Voice Cleaner** | `POST /api/studio/originals/{id}/start/`, `/voice-clean/start/` (`standard_2stem`, `standard_4stem`, `hifi_4stem`, `hifi_6stem`) | R2 storage proxy failover (`x-storage-proxy-host` / `x-storage-direct-host`), and direct `loop`/`stems`/`mix` Mastering handoff |
-| **5-Piece Drum Kit Sub-Stem Splitter** | `POST /api/studio/originals/{id}/drums/start/` & `GET .../drums/` | Splits `Drums` stem into **5 discrete sub-channels**: `Kick`, `Snare`, `Toms`, `Hi-Hat`, and `Cymbals` |
-| **AI Chords, Beat Grid & Lead Sheet** | `POST /api/studio/originals/{id}/chords/start/`, `/lyrics/start/`, `/lyrics/edit/` | Slash-aware chord transposer, `30ms` binary-search beat snapper, `Bar.Beat.1/16` loop quantizer, `3.0s` instrumental chord-gap injector, and printable HTML/PDF Lead Sheet generator |
-| **ITU-R BS.1770-4 Loudness & 100ms True-Peak** | WebAssembly `ebur128` LUFS Meter & Loudness Penalty | Bilinear K-weighted Integrated/Short-Term/Momentary LUFS, $P_{95}-P_{10}$ LRA, 4x oversampled True Peak (`dBTP`) with **100ms-precision binary-search peak timestamp locator**, and 9-platform Streaming Loudness Penalty table |
-| **Converta Hi-Res Converter** | `GET /api/v1/formats`, `POST /api/v1/convert`, `POST /api/v1/stem-export` | Supports `wav` (`16/24/32-bit`), `aiff` (`16/24/32-bit`), `flac` (`16/24-bit`), `ogg`, `aac`, `m4a`, `mp3` at `44.1 / 48 kHz` with dithering |
-| **ID3v2.3 & ISRC (`TSRC`) Release Tagger** | Online ID3v2.3 Tag Editor | Reads/writes `TIT2`, `TPE1`, `TALB`, `TYER`, `TRCK`, `TCON`, `TBPM`, `TKEY`, `TPUB`, `COMM`, `USLT`, `APIC` (`3000x3000` cover art), and ISO 3901 validated 12-char `TSRC` (ISRC) on MP3, FLAC, and WAV |
-| **Smart Links & AI Music Video (`h3-max`)** | `/api/smart-links/` (`soundboo.st`), `/api/audio/generate/`, `/api/shoots/` | Auto-resolves DSP metadata, publishes `https://soundboo.st/<slug>` landing pages, computes `h3-max` retake credit spending caps, and generates beat-locked `Shoots` storyboards from REAPER audio |
-| **Account-Tier Feature Entitlements** | `GET /api/user-info/`, `GET /api/billing/info` | Dynamically resolves exact plan entitlements (`free`, `pay_as_you_go`, `starter`, `unlimited`, `creator`, `director`, `unlimited_plus`, `studio`) and enforces per-tier gates |
-| **Progressive MCP Tool Discovery** | `soundboost_discover_tools` (`CatalogTransform` + BM25) | Exposes **4 pinned entry tools** by default (~82% context reduction) and dynamically activates any of **8 modular tool packs** via BM25 search, pack name, or `sync_account_tier` |
-| **Deep REAPER 7.82 & Video Pipeline** | — | `SoundBoost_18Band_Mastering_EQ_Monitor.jsfx` (`options:gmem=SuavecitoSoundBoost`), `Suavecito_Live_Bridge_Daemon.lua` (`__startup.lua` + File Mailbox IPC), Loopback HTTP (`8080`) + UDP OSC (`9000`), 12 `.RfxChain` Genre Presets, `.RPP` Multitrack & Video Session Generator (`<VIDEO_EFFECT>`), and Audio-Reactive `.MP4` Video Renderer |
+> [!IMPORTANT]
+> **This is not the official SoundBoost MCP.** It's an independent, community-built toolkit, made with the SoundBoost team's permission. SoundBoost doesn't maintain or support it, so file bugs and questions [here](https://github.com/The-40-Thieves/Suavecitos-Soundboost.AI-Toolkit/issues), not with them. When SoundBoost ships its official MCP, use that for anything it covers.
 
 ---
 
-## MCP Tools (`soundboost-mcp` — MCP `2026-07-28` Specification — 22 Tools across 8 Progressive Packs)
+## Why this exists
 
-By default, `list_tools()` exposes **4 pinned entry tools** (`soundboost_discover_tools`, `audit_audio_loudness_and_release_readiness`, `soundboost_oauth_and_vault`, `soundboost_account_profile_and_billing`) so agent context windows stay compact, while **`get_tool()`** allows calling any of the 22 tools directly or unlocking packs (`core`, `free_tools`, `studio_harmony`, `studio_stems`, `distribution`, `mastering`, `bulk_mastering`, `music_video_shoots`) at runtime with `ToolListChangedNotification`.
+Finishing a song is the fun part. Getting it *release-ready* is a checklist: is it too loud for Spotify, is the true peak clipping, are the stems clean, is the ISRC in the file, does the cover art meet spec. Every one of those is a tab, an upload, and a wait.
 
-Every tool includes full **`ToolAnnotations`** (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), semantic `tags`, and structured JSON `outputSchema`. All long-running DSP and cloud tools also register **`TasksExtension` (`io.modelcontextprotocol/tasks`)** with `task=TaskConfig(mode="optional")`, streaming live **`Context.report_progress`** notifications in both background-task and foreground execution modes.
+This toolkit collapses that checklist into commands. Ask your agent *"is this mix ready for DistroKid?"* and it actually measures it. Tell it *"master it warm, hip-hop preset, -14 LUFS"* and it does it. Hit a key in REAPER and the stems land on tracks.
 
-| Tool | Annotations (`readOnly` / `openWorld`) | Background Task (`task=True`) | Description |
-| :--- | :---: | :---: | :--- |
-| **`soundboost_discover_tools`** | `readOnly=True`, `openWorld=False` | Sync | **Pinned Discovery Gateway:** List the 8 tool packs, run BM25 natural-language search across all 22 tools, activate/deactivate packs, or `sync_account_tier` to auto-unlock packs matching the user's live SoundBoost subscription. |
-| **`audit_audio_loudness_and_release_readiness`** | `readOnly=True`, `openWorld=False` | Sync | **Free Tool:** Full ITU-R BS.1770-4 Integrated/Short-Term/Momentary LUFS, $P_{95}-P_{10}$ LRA, 4x oversampled True Peak (`dBTP`) + 100ms binary-search timestamp, stereo correlation, 6-band spectral profile, 9-platform streaming penalty matrix, and DistroKid readiness verdict. |
-| **`read_release_metadata_tags`** | `readOnly=True`, `openWorld=False` | Sync | **Free Tool:** Read ID3v2.3 / FLAC / WAV metadata tags including 12-character ISRC (`TSRC`), BPM, Key, Publisher, Lyrics, and Cover Art status. |
-| **`write_release_metadata_tags`** | `readOnly=False`, `openWorld=False` | Sync | **Free Tool:** Write release metadata tags with ISO 3901 12-character ISRC validation (`CC-XXX-YY-NNNNN`), unsynchronized lyrics (`USLT`), and front cover art (`APIC`). |
-| **`transpose_and_quantize_musical_grid`** | `readOnly=True`, `openWorld=False` | Sync | Transpose chord progressions, classify Pitch Shift zone (`Natural zone` $\pm 3\text{ st}$ vs `Creative zone`), snap timestamps to synchronized beats (`30ms` tolerance), and quantize loops to `Bar.Beat.1/16`. |
-| **`generate_printable_lead_sheet`** | `readOnly=False`, `openWorld=False` | Sync | Merge word-level lyric segments and transposed chords (inserting `[Instrumental]` chord rows when vocal gaps $\ge 3.0\text{s}$) into a print-ready HTML Lead Sheet. |
-| **`soundboost_upload_and_master`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | **Pay-Gated Cloud Endpoint:** Upload audio to `api.soundboost.ai` and run any of the 8 cloud Mastering modes (`prompt`, `preset`, `auto`, `reference`, `chat`, `manual`, `mix_doctor`, `enhance`), with optional `wait_for_completion` polling. |
-| **`soundboost_studio_stems_and_drums`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | **Pay-Gated Cloud Endpoint:** Start/poll Studio 2/4/6-stem separation (`htdemucs`, `htdemucs_6s`), Voice Cleaner (`Voice` + `Artifacts`), **5-Piece Drum Kit sub-stem separation** (`Kick, Snare, Toms, Hi-Hat, Cymbals`), or hand off `loop`/`stems`/`mix` to Mastering. |
-| **`soundboost_studio_chords_and_lyrics`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | **Pay-Gated Cloud Endpoint:** Start, poll, or edit Studio AI Chord Recognition and Word-Synced Lyrics/Transcripts. |
-| **`soundboost_converta_audio`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | **Free Tool Endpoint:** Query live `converta.soundboost.ai` format specs or run hi-res format conversions (`wav`, `aiff`, `flac`, `ogg`, `aac`, `m4a`, `mp3`). |
-| **`soundboost_smart_links`** | `readOnly=False`, `openWorld=True` | Sync | **Pay-Gated Cloud Endpoint:** List, auto-scrape DSP metadata, create, update, and publish `https://soundboo.st/<slug>` Smart Links. |
-| **`soundboost_text_to_audio_and_mv_budget`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | **Pay-Gated Cloud Endpoint:** Generate AI Text-to-Audio / SFX and compute AI Music Video (`h3-max`) credit spending caps (`ec(quote)` formula). |
-| **`soundboost_oauth_and_vault`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Manage Google OAuth 2.0 PKCE (`S256`), `POST /api/google-login/` token exchange, OS Keyring (`WinVaultKeyring` / macOS Keychain / SecretService), and local loopback browser session handoff. |
-| **`soundboost_bulk_and_album_mastering`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | **Pay-Gated Cloud Endpoint:** Batch-master an entire Album/EP via SoundBoost Cloud (`/api/bulk-mastering/*` + `.zip` export). |
-| **`soundboost_youtube_and_soundcloud_ingest`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | **Pay-Gated Cloud Endpoint:** Ingest tracks directly from YouTube or SoundCloud URLs into Mastering (`/api/tracks/import-youtube/`, `/import-soundcloud/`) or Studio Stem Splitter (`/api/studio/public/import-youtube`, `/import-soundcloud`). |
-| **`soundboost_voice_and_prompt_assistant`** | `readOnly=False`, `openWorld=True` | Sync | **Pay-Gated Cloud Endpoint:** Translate natural-language or spoken mastering instructions via Cloud `Toki` (`POST /api/ai/prompt`) & `Deepgram` Voice Mastering (`/api/mastering-voice/*`). |
-| **`soundboost_music_video_and_shoots_director`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | **Pay-Gated Cloud + REAPER Video Pipeline:** Orchestrate AI Music Video (`h3-max`) projects (`/api/music-videos/`), `Shoots` storyboard scenes (`/api/shoots/`), Director Chat, Auto-QC scene regeneration, Spotify 9:16 Canvas clips, `reaper_to_shoots_storyboard` beat-locked cue sheets, and `render_reaper_video_pipeline` audio-reactive `.mp4` rendering. |
-| **`studio_practice_voicings_and_cloud_shifter`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | **Pay-Gated Cloud Stem Export + Client Helpers:** Export pitch-shifted/time-stretched stems via Cloud Studio (`POST /api/studio/originals/{id}/export/` & `POST /api/v1/stem-export`), generate interactive Chord Voicing & Fingering Diagrams (`guitar`, `ukulele`, `piano`, Module 534), and inspect binary LAME/Xing/Info Gapless MP3 headers (Modules 590–591). |
-| **`soundboost_track_lifecycle_and_telemetry`** | `readOnly=False`, `openWorld=True` | Sync | **Pay-Gated Cloud Endpoint:** Fetch pre/post mastering telemetry (`/api/get-master-stats`), run stem-assisted mastering prep (`/api/mastering/stem-prep`), generate waveforms, manage cover art, toggle favorites, create shareable public links, and delete tracks. |
-| **`soundboost_account_profile_and_billing`** | `readOnly=False`, `openWorld=True` | Sync | **Pay-Gated Cloud Endpoint:** Inspect live account-tier entitlements (`entitlements`, `all_tier_specs`), artist profiles (`/api/account/profile/`), username availability, social notifications, referrals, and Stripe subscription billing. |
-| **`install_reaper_jsfx_and_scripts`** | `readOnly=False`, `openWorld=False` | Sync | **Deep REAPER 7.82 Suite:** Install `gmem` 18-Band Mastering EQ JSFX, Live Bridge Daemon (`__startup.lua`), 12 `.RfxChain` Genre Presets, & Video Processor preset; inspect plugins; push live 18-band EQ via `gmem`/OSC; generate `.RPP` multitrack + video sessions; and render audio-reactive `.mp4` videos. |
-| **`list_soundboost_platform_capabilities`** | `readOnly=True`, `openWorld=False` | Sync | Return the complete specification matrix of EQ bands, presets, stem profiles, drum sub-stems, Converta formats, streaming loudness targets, and account tier entitlements. |
-
-### MCP Resources & Prompts
-
-- **`soundboost://specs/capabilities`** (`application/json`): Complete platform capability matrix.
-- **`soundboost://specs/eq-presets`** (`application/json`): Exact 18-band dB gain arrays (`20 Hz` to `15 kHz`) for all 12 genre presets.
-- **`soundboost://specs/reaper-jsfx`** (`text/plain`): Source code of the REAPER `SoundBoost_18Band_Mastering_EQ_Monitor.jsfx` plugin.
-- **Prompt `distrokid_release_mastering_workflow`**: Step-by-step release engineering runbook for auditing, stem/drum-kit cleanup, 18-band mastering, and ISO 3901 ISRC tagging.
+**The caller is the model.** No embedded LLM, no telemetry, no hardcoded credentials. Your agent (Claude, Cursor, whatever speaks MCP) does the thinking; this does the work.
 
 ---
 
-## CLI Usage (`soundboost`)
+## What it does
+
+| | Runs | Cost |
+|---|---|---|
+| 🎚️ **Loudness & release audit** · Integrated / short-term / momentary LUFS, LRA, 4x-oversampled true peak with the exact timestamp of the worst peak, and a penalty table for 9 streaming platforms | Local | Free |
+| 🏷️ **Release tagging** · ID3v2.3 / FLAC / WAV tags, validated ISRC codes, lyrics, 3000×3000 cover art | Local | Free |
+| 🎼 **Chord & grid tools** · Transpose progressions, snap to beats, quantize loops, print lead sheets, draw guitar / uke / piano voicings | Local | Free |
+| 🔁 **Format conversion** · WAV, AIFF, FLAC, OGG, AAC, M4A, MP3 at 44.1 / 48 kHz, with dither | Cloud (Converta) | Free |
+| ✨ **AI mastering** · 8 modes: prompt, preset, auto, reference, chat, manual, Mix Doctor, enhance. 12 genre presets, 18-band EQ, stereo width, target LUFS | Cloud | Paid tier |
+| 🥁 **Stem separation** · 2 / 4 / 6 stems, voice cleaning, and drum splitting into kick, snare, toms, hi-hat, cymbals | Cloud | Tier-gated |
+| 📀 **Album mastering** · Batch-master a whole EP to one loudness target, export as ZIP | Cloud | Unlimited Plus and up |
+| 🔗 **Smart links** · Build `soundboo.st/<slug>` landing pages with auto-scraped streaming links | Cloud | Tier-gated |
+| 🎬 **Music video & Shoots** · AI music video projects, beat-locked storyboards from your REAPER session, 9:16 Spotify Canvas clips, credit budgeting | Cloud + REAPER | Paid tier |
+| 🎛️ **REAPER suite** · 18-band mastering EQ JSFX, one-click stem importer, live bridge daemon, 12 genre FX chains, session and video generators | Local | Free |
+
+Cloud features use your own SoundBoost account and plan. Nothing here unlocks anything you aren't paying for.
+
+---
+
+## Quick start
+
+Requires **Python 3.11+**.
 
 ```bash
-# 1. Free Tool: Run full ITU-R BS.1770-4 Loudness, 100ms True-Peak & DistroKid Release Audit
-soundboost audit path/to/mix.wav
-
-# 2. Pay-Gated Cloud AI Mastering: Upload & Master via SoundBoost Cloud (/api/tracks/{id}/master/)
-soundboost master upload --file input.wav
-soundboost master master --track-id 42 --mode preset --preset hip_hop --width 112 --lufs -14.0
-
-# 3. Free Tool: Write ID3v2.3 / WAV / FLAC metadata with validated 12-char ISRC & 3000x3000 cover art
-soundboost tags mastered_24bit.wav --title "Midnight Drive" --artist "Suavecito" --isrc "US-ABC-26-00001" --bpm 124 --key "Cm" --cover cover.jpg
-
-# 4. Transpose chords, check Pitch Shift zone, and quantize loop to Bar.Beat.1/16
-soundboost grid --chords "Cm7,Fm7,Abmaj7,G7b9/B" --semitones -2 --flats --bpm 128 --start 3.72 --end 11.28
-
-# 5. Install REAPER 18-Band Mastering EQ JSFX & Multitrack Stem Importer ReaScript
-soundboost reaper-install
-
-# 6. Authenticate via Google OAuth 2.0 / Browser Loopback & Store in OS Keyring
-soundboost auth status
-soundboost auth browser-login
-soundboost auth google-exchange --token "<google-id-or-access-token>"
-
-# 7. Launch OAuth 2.1 Protected Streamable HTTP MCP Server
-soundboost serve-mcp --transport http --port 8000 --oauth google
-
-# 8. Pay-Gated Cloud Bulk Mastering (/api/bulk-mastering/*)
-soundboost bulk-master start --tracks "42,43,44" --preset pop --lufs -14.0
-
-# 9. Pay-Gated Cloud Toki Prompt Engine (POST /api/ai/prompt)
-soundboost prompt-eq "warm 808 sub bass, clean muddy low-mids, crisp vocal presence, airy 15kHz top end" --track-id 42
-
-# 10. Render Guitar / Ukulele / Piano Chord Voicing & Fingering Diagrams (Module 534)
-soundboost voicings "Cm,Abmaj7,Eb,Bb" --instrument guitar
-
-# 11. Pay-Gated Studio Cloud Pitch-Shift & Time-Stretch Stem Export (POST /api/studio/originals/{id}/export/)
-soundboost shifter 42 --semitones 2 --speed 1.15 --format wav --bits 24
-
-# 12. Inspect LAME/Xing/Info Gapless MP3 Headers & 1105-Sample Priming Delay
-soundboost mp3-inspect stem_loop.mp3
-
-# 13. Pay-Gated Cloud Ingestion: YouTube or SoundCloud Directly into Mastering or Studio Stem Splitter
-soundboost ingest studio-youtube --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+git clone https://github.com/The-40-Thieves/Suavecitos-Soundboost.AI-Toolkit.git
+cd Suavecitos-Soundboost.AI-Toolkit
+pip install -e .
 ```
+
+Then audit something. No account needed:
+
+```bash
+soundboost audit my_mix.wav
+```
+
+You get integrated LUFS, true peak (and *where* it peaks), loudness range, stereo correlation, a spectral profile, how much each platform will turn you down, and a straight answer on whether it's ready to distribute.
 
 ---
 
-## Configuration (`mcp_config.json`)
+## The CLI
+
+### Free, offline
+
+```bash
+# Is it ready to release?
+soundboost audit mix.wav
+
+# Tag the master with everything a distributor wants
+soundboost tags master_24bit.wav --title "Midnight Drive" --artist "Suavecito" \
+  --isrc "US-ABC-26-00001" --bpm 124 --key "Cm" --cover cover.jpg
+
+# Transpose down a whole step, flats only, and quantize a loop at 128 BPM
+soundboost grid --chords "Cm7,Fm7,Abmaj7,G7b9/B" --semitones -2 --flats \
+  --bpm 128 --start 3.72 --end 11.28
+
+# Chord shapes for practice
+soundboost voicings "Cm,Abmaj7,Eb,Bb" --instrument guitar
+
+# Check an MP3's gapless headers before you loop it
+soundboost mp3-inspect stem_loop.mp3
+```
+
+### With your SoundBoost account
+
+```bash
+# Sign in once; the token goes to your OS keyring
+soundboost auth browser-login
+soundboost auth status
+
+# Upload and master
+soundboost master upload --file mix.wav
+soundboost master master --track-id 42 --mode preset --preset hip_hop --width 112 --lufs -14.0
+
+# Describe the sound you want in plain English
+soundboost prompt-eq "warm 808 sub, clean up the low-mids, crisp vocal, airy top end" --track-id 42
+
+# Master a whole EP to one target
+soundboost bulk-master start --tracks "42,43,44" --preset pop --lufs -14.0
+
+# Pull a track you own from YouTube or SoundCloud into the stem splitter
+soundboost ingest studio-youtube --url "https://www.youtube.com/watch?v=<your-video>"
+
+# Pitch-shift and time-stretch stems in the cloud
+soundboost shifter 42 --semitones 2 --speed 1.15 --format wav --bits 24
+```
+
+Run `soundboost --help` for the full list: `studio`, `converta`, `shoots`, `mv-budget`, `account`, `specs`, and more.
+
+**Genre presets:** `hip_hop` · `trap` · `pop` · `rock_indie` · `rnb_soul` · `electronic_edm` · `acoustic_folk` · `jazz_blues` · `classical_orchestral` · `metal_punk` · `latin_reggaeton` · `podcast_spoken_word`
+
+---
+
+## The MCP server
+
+Point any MCP client at it and your agent gets 22 tools for working with audio and SoundBoost.
+
+### Setup
 
 ```json
 {
   "mcpServers": {
-    "suavecitos-soundboost-toolkit": {
-      "command": "python",
-      "args": ["E:\\Projects\\suavecitos-soundboost-toolkit\\server.py"],
+    "soundboost-toolkit": {
+      "command": "soundboost-mcp",
       "env": {
-        "PYTHONIOENCODING": "utf-8",
-        "SOUNDBOOST_ACCESS_TOKEN": "optional-bearer-token"
+        "PYTHONIOENCODING": "utf-8"
       }
     }
   }
 }
 ```
 
-### Environment Variables
+If `soundboost-mcp` isn't on your PATH, use `"command": "python"` with `"args": ["/path/to/Suavecitos-Soundboost.AI-Toolkit/server.py"]`.
 
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `SOUNDBOOST_ACCESS_TOKEN` | Bearer token for authenticated cloud calls | Loaded from OS Keyring or `~/.soundboost/credentials.json` if omitted |
-| `SOUNDBOOST_GUEST_TOKEN` | Optional `x-studio-guest-token` for anonymous Studio sessions | Optional |
+For remote use, serve it over HTTP with OAuth in front:
+
+```bash
+soundboost serve-mcp --transport http --port 8000 --oauth google
+```
+
+### It doesn't flood your context
+
+22 tool definitions is a lot of tokens to load into every conversation. So by default the server exposes only **4 entry tools**. Your agent unlocks the rest on demand, by searching for what it needs or by syncing to your SoundBoost plan so it sees exactly the tools you can actually use.
+
+| Pack | What's inside | Plan |
+|---|---|---|
+| `core` *(always on)* | Tool discovery, loudness audit, sign-in, account & plan info | Free |
+| `free_tools` | Tag reader/writer, format converter, platform specs, REAPER installer | Free |
+| `studio_harmony` | Chord & lyric recognition, lead sheets, voicings, pitch/time shifter, loop grid | Free |
+| `studio_stems` | Stem separation, voice cleaning, drum splitting, YouTube/SoundCloud ingest | Free |
+| `distribution` | Smart links | Free |
+| `mastering` | Cloud mastering, natural-language & voice mastering, before/after stats | Pay-as-you-go and up |
+| `music_video_shoots` | AI music video, Shoots director, text-to-audio, credit budgeting | Pay-as-you-go and up |
+| `bulk_mastering` | Album / EP batch mastering | Unlimited Plus, Director, Studio |
+
+Want everything visible up front? `soundboost serve-mcp --discovery all`. Want a specific set? `--packs mastering,studio_stems`.
+
+Long-running jobs (mastering, stem splits, conversions) run as background tasks and stream progress back, so your agent isn't stuck staring at a spinner.
+
+### Also included
+
+- **Resources:** the full platform capability matrix, the 18-band EQ curves for every genre preset, and the REAPER JSFX source.
+- **Prompt:** `distrokid_release_mastering_workflow`, a step-by-step runbook that takes a track from raw mix to tagged, distribution-ready master.
+
+---
+
+## REAPER
+
+```bash
+soundboost reaper-install
+```
+
+That drops in:
+
+- **18-Band Mastering EQ Monitor** (JSFX): SoundBoost's EQ curve, live in your session. The MCP server can push EQ changes into it while the track plays.
+- **Stem Import** (Lua): pulls separated stems onto their own tracks in one go.
+- **Live Bridge Daemon** (Lua): lets the toolkit talk to a running REAPER.
+- **12 genre FX chains**, matching the mastering presets.
+- **9:16 Canvas Visualizer** video preset for vertical clips.
+
+By default it only copies files. Live control is opt-in, because it touches your REAPER config:
+
+```bash
+soundboost reaper-install --configure-bridge   # enable web control (port 8080) + OSC (port 9000) in REAPER.ini
+soundboost reaper-install --enable-daemon      # auto-start the Live Bridge Daemon when REAPER launches
+```
+
+From there the toolkit can generate full `.RPP` sessions from your stems, build beat-locked storyboards from your arrangement, and render audio-reactive `.mp4` videos.
+
+---
+
+## Auth & config
+
+Sign in with `soundboost auth browser-login` and your token is stored in your OS keyring (Windows Credential Manager, macOS Keychain, or Secret Service on Linux). Or set it yourself:
+
+| Variable | What it's for |
+|---|---|
+| `SOUNDBOOST_ACCESS_TOKEN` | Bearer token for cloud calls. Falls back to the keyring, then `~/.soundboost/credentials.json`. |
+| `SOUNDBOOST_GUEST_TOKEN` | Optional guest token for anonymous Studio sessions. |
+
+---
+
+## Under the hood
+
+For the curious. None of this is required reading.
+
+- **Loudness** follows ITU-R BS.1770-4 / EBU R128: K-weighted gating, LRA from the 10th to 95th percentile, 4x-oversampled true peak, and a binary search that pins the worst peak to within 100 ms.
+- **Local EQ** is an 18-band cascade of constant-Q biquads (20 Hz to 15 kHz, ±6 dB), followed by mid/side width (0 to 200%), a lookahead true-peak limiter, and TPDF dither to 16 or 24 bit.
+- **ISRCs** are validated against ISO 3901 before they're written.
+- **MCP tools** carry full annotations (read-only, destructive, idempotent, open-world) and structured output schemas, so agents know what's safe to call without asking.
+- Built on FastMCP, httpx, Typer, NumPy/SciPy, soundfile, and mutagen.
+
+---
+
+## Project layout
+
+```
+soundboost_toolkit/   CLI, MCP server, API client, OAuth, DSP, tagging, REAPER integration
+reaper/               JSFX effect, Lua scripts, video preset
+skills/               Agent skill file for this toolkit
+tests/                Test suite
+server.py             Direct entry point for MCP clients
+```
 
 ---
 
 ## License
 
-Apache-2.0
+Apache-2.0.
+
+SoundBoost, SoundBoost.ai, and related names belong to their respective owners. This project is independent and is not the official SoundBoost MCP.
