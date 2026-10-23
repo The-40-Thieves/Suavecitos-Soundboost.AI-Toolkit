@@ -170,16 +170,73 @@ class SoundBoostToolkitTests(unittest.TestCase):
 
         async def _verify_mcp() -> None:
             async with Client(mcp) as client:
+                # 1. Verify default Progressive Discovery mode starts with only the 4 Pinned Entry Tools (~83% context reduction)
+                await client.call_tool("soundboost_discover_tools", {"action": "reset"})
+                initial_tools = await client.list_tools()
+                self.assertEqual(len(initial_tools), 4)
+                initial_names = {t.name for t in initial_tools}
+                self.assertEqual(
+                    initial_names,
+                    {
+                        "soundboost_discover_tools",
+                        "audit_audio_loudness_and_release_readiness",
+                        "soundboost_oauth_and_vault",
+                        "soundboost_account_profile_and_billing",
+                    },
+                )
+
+                # 2. Verify BM25 Search discovers and auto-unlocks matching tools
+                search_res = await client.call_tool(
+                    "soundboost_discover_tools",
+                    {"action": "search", "query": "split 6 stems and 5-piece drum kit", "max_results": 2},
+                )
+                self.assertFalse(search_res.is_error)
+                after_search_tools = await client.list_tools()
+                self.assertIn("soundboost_studio_stems_and_drums", {t.name for t in after_search_tools})
+
+                # 3. Verify Pack Activation ('mastering') and Account-Tier Sync ('free' vs 'unlimited' vs 'studio')
+                await client.call_tool("soundboost_discover_tools", {"action": "reset"})
+                await client.call_tool(
+                    "soundboost_discover_tools",
+                    {"action": "activate_pack", "pack": "mastering"},
+                )
+                mastering_pack_tools = await client.list_tools()
+                self.assertEqual(len(mastering_pack_tools), 7)  # 4 core + 3 mastering
+
+                await client.call_tool(
+                    "soundboost_discover_tools",
+                    {"action": "sync_account_tier", "account_tier": "free"},
+                )
+                free_tier_tools = {t.name for t in await client.list_tools()}
+                self.assertEqual(len(free_tier_tools), 17)
+                self.assertNotIn("soundboost_upload_and_master", free_tier_tools)
+                self.assertNotIn("soundboost_bulk_and_album_mastering", free_tier_tools)
+
+                await client.call_tool(
+                    "soundboost_discover_tools",
+                    {"action": "sync_account_tier", "account_tier": "unlimited"},
+                )
+                unlim_tier_tools = {t.name for t in await client.list_tools()}
+                self.assertEqual(len(unlim_tier_tools), 22)
+                self.assertIn("soundboost_upload_and_master", unlim_tier_tools)
+                self.assertNotIn("soundboost_bulk_and_album_mastering", unlim_tier_tools)
+
+                # 4. Unlock all 23 tools ('studio' tier / pack='all') and verify annotations on every tool
+                await client.call_tool(
+                    "soundboost_discover_tools",
+                    {"action": "activate_pack", "pack": "all"},
+                )
                 tools = await client.list_tools()
-                self.assertEqual(len(tools), 22)
+                self.assertEqual(len(tools), 23)
                 tool_map = {t.name: t for t in tools}
                 self.assertNotIn("render_local_18band_master", tool_map)
 
-                # Verify ToolAnnotations on all tools
+                # Verify ToolAnnotations on all 23 tools
                 for t in tools:
                     self.assertIsNotNone(t.annotations, f"Missing annotations on {t.name}")
                     self.assertTrue(bool(t.annotations.title), f"Missing title on {t.name}")
 
+                self.assertTrue(tool_map["soundboost_discover_tools"].annotations.read_only_hint)
                 self.assertTrue(tool_map["audit_audio_loudness_and_release_readiness"].annotations.read_only_hint)
                 self.assertFalse(tool_map["audit_audio_loudness_and_release_readiness"].annotations.open_world_hint)
                 self.assertTrue(tool_map["soundboost_upload_and_master"].annotations.open_world_hint)
@@ -192,6 +249,7 @@ class SoundBoostToolkitTests(unittest.TestCase):
                 # Verify MCP Resources & Prompts
                 resources = await client.list_resources()
                 uris = {str(r.uri) for r in resources}
+                self.assertIn("soundboost://specs/tool-packs", uris)
                 self.assertIn("soundboost://specs/capabilities", uris)
                 self.assertIn("soundboost://specs/eq-presets", uris)
                 self.assertIn("soundboost://specs/reaper-jsfx", uris)
@@ -200,7 +258,10 @@ class SoundBoostToolkitTests(unittest.TestCase):
                 prompt_names = {p.name for p in prompts}
                 self.assertIn("distrokid_release_mastering_workflow", prompt_names)
 
-                # Verify calling tools through the MCP protocol
+                # Reset back to 4 core tools and verify hidden tools remain directly callable by name
+                await client.call_tool("soundboost_discover_tools", {"action": "reset"})
+                self.assertEqual(len(await client.list_tools()), 4)
+
                 kat_res = await client.call_tool("soundboost_cipher_tool", {"action": "kat"})
                 self.assertFalse(kat_res.is_error)
 

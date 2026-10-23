@@ -427,9 +427,34 @@ def cmd_serve_mcp(
         "--oauth",
         help="Inbound MCP OAuth 2.1 provider for HTTP: none | google | github | jwt | oauth_proxy | remote",
     ),
+    discovery: str = typer.Option(
+        "progressive",
+        "--discovery",
+        help="Progressive tool discovery mode: progressive (4 entry tools + BM25 search/pack unlock) | all (all 23 tools visible)",
+    ),
+    packs: str | None = typer.Option(
+        None,
+        "--packs",
+        help="Optional comma-separated initial tool packs to activate in progressive mode (e.g. mastering,studio_stems)",
+    ),
 ) -> None:
-    """Launch the FastMCP server over `stdio` or OAuth 2.1-protected `Streamable HTTP`."""
+    """Launch the FastMCP server over `stdio` or OAuth 2.1-protected `Streamable HTTP` with progressive tool discovery."""
+    from soundboost_toolkit.constants import MCP_TOOL_PACKS
+    from soundboost_toolkit.mcp_server import PROGRESSIVE_DISCOVERY
     from soundboost_toolkit.mcp_server import mcp as mcp_instance
+
+    disc_mode = discovery.strip().lower()
+    if disc_mode == "all":
+        PROGRESSIVE_DISCOVERY.mode = "all"
+        PROGRESSIVE_DISCOVERY.active_packs = set(MCP_TOOL_PACKS.keys())
+    else:
+        PROGRESSIVE_DISCOVERY.mode = "progressive"
+        PROGRESSIVE_DISCOVERY.active_packs = {"core"}
+        if packs:
+            for p in packs.split(","):
+                pk = p.strip().lower()
+                if pk in MCP_TOOL_PACKS:
+                    PROGRESSIVE_DISCOVERY.active_packs.add(pk)
 
     if oauth and oauth.strip().lower() != "none":
         mcp_instance.auth = build_mcp_oauth_provider(oauth)
@@ -608,11 +633,11 @@ def cmd_shoots(
 def cmd_account(
     action: str = typer.Argument(
         "entitlements",
-        help="entitlements | tiers | profile | billing | products | notifications | unread | referral | check-username",
+        help="entitlements | tiers | tool-packs | profile | billing | products | notifications | unread | referral | check-username",
     ),
     username: str | None = typer.Option(None, "--username", "-u", help="Username to inspect or check"),
 ) -> None:
-    """Inspect SoundBoost Account-Level Entitlements, Artist Profile, Notifications, Referrals & Subscription Billing."""
+    """Inspect SoundBoost Account-Level Entitlements, Progressive MCP Tool Packs, Artist Profile, Notifications, Referrals & Subscription Billing."""
     client = SoundBoostClient()
     act = action.strip().lower().replace("_", "-")
     if act == "entitlements":
@@ -621,6 +646,10 @@ def cmd_account(
         from soundboost_toolkit.constants import ACCOUNT_TIER_ENTITLEMENTS
 
         res = {"account_tier_entitlements": ACCOUNT_TIER_ENTITLEMENTS}
+    elif act in {"tool-packs", "packs"}:
+        from soundboost_toolkit.constants import MCP_TOOL_PACKS, TIER_UNLOCKED_MCP_PACKS
+
+        res = {"tool_packs": MCP_TOOL_PACKS, "tier_unlocked_packs": TIER_UNLOCKED_MCP_PACKS}
     elif act == "profile":
         res = client.get_public_artist_profile(username) if username else client.get_account_profile()
     elif act == "billing":

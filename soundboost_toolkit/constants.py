@@ -515,3 +515,117 @@ UKULELE_CHORD_SHAPES: Final[dict[str, dict[str, object]]] = {
     "Bb": {"frets": (3, 2, 1, 1), "fingers": (3, 2, 1, 1), "base_fret": 1, "barres": (1,)},
 }
 
+# ---------------------------------------------------------------------------
+# Progressive MCP Tool Discovery Packs & Account-Tier Pack Mapping
+# ---------------------------------------------------------------------------
+MCP_TOOL_PACKS: Final[dict[str, dict[str, object]]] = {
+    "core": {
+        "pack_id": "core",
+        "title": "Pinned Entry & Discovery Pack",
+        "min_tier": "free",
+        "always_pinned": True,
+        "summary": "Progressive tool search/activation, free LUFS/True-Peak loudness analyzer, OAuth 2.1 login, and account entitlement inspector.",
+        "tools": (
+            "soundboost_discover_tools",
+            "audit_audio_loudness_and_release_readiness",
+            "soundboost_oauth_and_vault",
+            "soundboost_account_profile_and_billing",
+        ),
+    },
+    "free_tools": {
+        "pack_id": "free_tools",
+        "title": "Free Audio Utilities & REAPER Bundle Pack",
+        "min_tier": "free",
+        "always_pinned": False,
+        "summary": "ID3v2.3/ISRC tag reader/writer, Converta hi-res format converter, platform specs, and REAPER JSFX/ReaScript installer.",
+        "tools": (
+            "read_release_metadata_tags",
+            "write_release_metadata_tags",
+            "soundboost_converta_audio",
+            "list_soundboost_platform_capabilities",
+            "install_reaper_jsfx_and_scripts",
+        ),
+    },
+    "studio_harmony": {
+        "pack_id": "studio_harmony",
+        "title": "Studio Chords, Lyrics, Voicings & Loop Grid Pack",
+        "min_tier": "free",
+        "always_pinned": False,
+        "summary": "AI chord recognition & word-synced lyric lead sheets, Guitar/Ukulele/Piano voicing diagrams, cloud stem pitch/time shifter, and bar.beat.16th loop quantizer.",
+        "tools": (
+            "soundboost_studio_chords_and_lyrics",
+            "generate_printable_lead_sheet",
+            "studio_practice_voicings_and_cloud_shifter",
+            "transpose_and_quantize_musical_grid",
+        ),
+    },
+    "studio_stems": {
+        "pack_id": "studio_stems",
+        "title": "Studio Stem Splitter, 5-Piece Drum Kit & YouTube/SC Ingest Pack",
+        "min_tier": "free",
+        "always_pinned": False,
+        "summary": "2/4/6-stem neural separation, Voice Cleaner, 5-Piece Drum Kit sub-stems (Plus), Studio->Mastering handoff, and direct YouTube/SoundCloud ingestion.",
+        "tools": (
+            "soundboost_studio_stems_and_drums",
+            "soundboost_youtube_and_soundcloud_ingest",
+        ),
+    },
+    "distribution": {
+        "pack_id": "distribution",
+        "title": "Smart Links (`soundboo.st`) & Cryptographic Codec Pack",
+        "min_tier": "free",
+        "always_pinned": False,
+        "summary": "Artist link-in-bio Smart Links (`soundboo.st/<slug>`) with auto-scraped DSP links and SoundBoost AES-CBC/CTR parameter & token cipher tools.",
+        "tools": (
+            "soundboost_smart_links",
+            "soundboost_cipher_tool",
+        ),
+    },
+    "mastering": {
+        "pack_id": "mastering",
+        "title": "Cloud AI Mastering, Voice/Toki Prompt & Track Telemetry Pack",
+        "min_tier": "pay_as_you_go",
+        "always_pinned": False,
+        "summary": "Pay-gated 8-mode Cloud AI Mastering, Mix Doctor, Audio Enhancer, Deepgram Voice + Toki AI prompt mastering, pre/post master stats, and stem-prep.",
+        "tools": (
+            "soundboost_upload_and_master",
+            "soundboost_voice_and_prompt_assistant",
+            "soundboost_track_lifecycle_and_telemetry",
+        ),
+    },
+    "bulk_mastering": {
+        "pack_id": "bulk_mastering",
+        "title": "Cloud Bulk & Album Mastering Pack (Unlimited Plus / Director / Studio)",
+        "min_tier": "unlimited_plus",
+        "always_pinned": False,
+        "summary": "Batch album/EP cloud mastering (`/api/bulk-mastering/*`) with unified target LUFS and ZIP export.",
+        "tools": (
+            "soundboost_bulk_and_album_mastering",
+        ),
+    },
+    "music_video_shoots": {
+        "pack_id": "music_video_shoots",
+        "title": "AI Music Video (`h3-max`), Shoots Director Chat & Text-to-Audio Pack",
+        "min_tier": "pay_as_you_go",
+        "always_pinned": False,
+        "summary": "AI Music Video (`h3-max`), `Shoots` Director Chat (`/api/shoots/{id}/director-message`), scene regeneration, 9:16 Spotify Canvas, credit budget calculator, and Text-to-Audio.",
+        "tools": (
+            "soundboost_music_video_and_shoots_director",
+            "soundboost_text_to_audio_and_mv_budget",
+        ),
+    },
+}
+
+# Exact MCP Tool Packs unlocked by each SoundBoost account level
+TIER_UNLOCKED_MCP_PACKS: Final[dict[str, tuple[str, ...]]] = {
+    "free": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution"),
+    "pay_as_you_go": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "music_video_shoots"),
+    "starter": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "music_video_shoots"),
+    "unlimited": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "music_video_shoots"),
+    "creator": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "music_video_shoots"),
+    "director": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "bulk_mastering", "music_video_shoots"),
+    "unlimited_plus": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "bulk_mastering", "music_video_shoots"),
+    "studio": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "bulk_mastering", "music_video_shoots"),
+}
+
+

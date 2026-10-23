@@ -13,15 +13,27 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import mcp.types as mcp_types
 from fastmcp import Context, FastMCP
+from fastmcp.server.transforms import GetToolNext
+from fastmcp.server.transforms.catalog import CatalogTransform
+from fastmcp.server.transforms.search.base import (
+    _extract_searchable_text,
+    serialize_tools_for_output_json,
+    serialize_tools_for_output_markdown,
+)
+from fastmcp.server.transforms.search.bm25 import _BM25Index
+from fastmcp.tools.base import Tool
 from fastmcp.utilities.tasks import TaskConfig
+from fastmcp.utilities.versions import VersionSpec
 from fastmcp_tasks import TasksExtension
 from mcp.types import ToolAnnotations
 
-from soundboost_toolkit.client import SoundBoostClient
+from soundboost_toolkit.client import SoundBoostClient, resolve_account_entitlements
 from soundboost_toolkit.constants import (
     ACCOUNT_TIER_ENTITLEMENTS,
     CONVERTA_FORMATS,
@@ -29,10 +41,12 @@ from soundboost_toolkit.constants import (
     MASTERING_EQ_FREQUENCIES_HZ,
     MASTERING_GENRE_PRESETS,
     MASTERING_MODES,
+    MCP_TOOL_PACKS,
     MV_CHARACTER_REF_CAPS,
     PRESET_EQ_CURVES_18BAND,
     STEM_PROFILES,
     STREAMING_TARGETS,
+    TIER_UNLOCKED_MCP_PACKS,
 )
 from soundboost_toolkit.crypto import (
     build_ui_security_headers,
@@ -81,6 +95,111 @@ _tasks_backend_url = os.environ.get("SOUNDBOOST_TASKS_URL")
 mcp.add_extension(
     TasksExtension(url=_tasks_backend_url) if _tasks_backend_url else TasksExtension()
 )
+
+
+class SoundBoostProgressiveDiscoveryTransform(CatalogTransform):
+    """Progressive Tool Discovery & Context-Window Budget Manager for SoundBoost MCP.
+
+    Prevents agent context-window bloat by exposing only the 4 Pinned Entry Tools (`core` pack)
+    in `list_tools()` by default (~83% token reduction), while keeping all 23 tools:
+    1. Searchable on demand via BM25 Okapi relevance ranking (`action='search'`) with compact Markdown schemas.
+    2. Dynamically activatable/deactivatable by domain pack (`action='activate_pack'` / `'deactivate_pack'`)
+       with `notifications/tools/list_changed`.
+    3. Automatically filterable to the user's exact SoundBoost account level (`action='sync_account_tier'`).
+    4. Directly callable by name at any time (`get_tool()` delegates to `call_next`).
+    """
+
+    def __init__(self, initial_mode: str | None = None) -> None:
+        super().__init__()
+        env_mode = (initial_mode or os.environ.get("SOUNDBOOST_MCP_DISCOVERY_MODE", "progressive")).strip().lower()
+        self.mode: str = env_mode if env_mode in {"progressive", "all"} else "progressive"
+        self.active_packs: set[str] = (
+            set(MCP_TOOL_PACKS.keys()) if self.mode == "all" else {"core"}
+        )
+        self.active_tool_names: set[str] = set()
+        self._bm25_index = _BM25Index()
+        self._indexed_names: list[str] = []
+
+    def get_visible_tool_names(self) -> set[str]:
+        if self.mode == "all":
+            names: set[str] = set()
+            for spec in MCP_TOOL_PACKS.values():
+                names.update(str(t) for t in spec.get("tools", ()))  # type: ignore[arg-type]
+            return names | self.active_tool_names
+
+        visible: set[str] = set(self.active_tool_names)
+        for pack_id in self.active_packs | {"core"}:
+            spec = MCP_TOOL_PACKS.get(pack_id, {})
+            visible.update(str(t) for t in spec.get("tools", ()))  # type: ignore[arg-type]
+        return visible
+
+    async def transform_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
+        if self.mode == "all":
+            return list(tools)
+        visible_names = self.get_visible_tool_names()
+        return [t for t in tools if t.name in visible_names]
+
+    async def get_tool(
+        self, name: str, call_next: GetToolNext, *, version: VersionSpec | None = None
+    ) -> Tool | None:
+        # Always allow direct tool invocation by name even if the tool schema is currently collapsed in list_tools()
+        return await call_next(name, version=version)
+
+    async def search_catalog(
+        self,
+        ctx: Context | None,
+        query: str,
+        *,
+        max_results: int = 5,
+        output_format: str = "markdown",
+        unlock_matches: bool = True,
+    ) -> dict[str, Any]:
+        catalog = list(await self.get_tool_catalog(ctx)) if ctx is not None else []
+        if not catalog:
+            # Fallback if called outside an active MCP context
+            catalog = list(await mcp._local_provider.list_tools())
+
+        documents = [_extract_searchable_text(t) for t in catalog]
+        self._bm25_index = _BM25Index()
+        self._bm25_index.build(documents)
+        self._indexed_names = [t.name for t in catalog]
+
+        indices = self._bm25_index.query(query, max(1, max_results))
+        tools_by_name = {t.name: t for t in catalog}
+        matched_tools = [tools_by_name[self._indexed_names[i]] for i in indices]
+        matched_names = [t.name for t in matched_tools]
+
+        if unlock_matches and matched_names:
+            self.active_tool_names.update(matched_names)
+            await _notify_tool_list_changed(ctx)
+
+        if output_format.strip().lower() == "json":
+            rendered: Any = serialize_tools_for_output_json(matched_tools)
+        else:
+            rendered = serialize_tools_for_output_markdown(matched_tools)
+
+        return {
+            "query": query,
+            "matched_count": len(matched_tools),
+            "matched_tools": matched_names,
+            "unlocked_in_list_tools": unlock_matches,
+            "schemas": rendered,
+        }
+
+
+PROGRESSIVE_DISCOVERY = SoundBoostProgressiveDiscoveryTransform()
+mcp.add_transform(PROGRESSIVE_DISCOVERY)
+
+
+async def _notify_tool_list_changed(ctx: Context | None) -> None:
+    """Safely emit `notifications/tools/list_changed` when progressive tool visibility changes."""
+    if ctx is None:
+        return
+    try:
+        await ctx.send_notification(mcp_types.ToolListChangedNotification())
+    except RuntimeError:
+        return
+
 
 
 async def _notify_progress(
@@ -137,6 +256,163 @@ async def _poll_until_ready(
             await _notify_progress(ctx, max_wait_sec, max_wait_sec, f"{task_label} finished ({status_str or 'done'})")
             return last_res
         await asyncio.sleep(max(0.5, poll_interval_sec))
+
+
+# ---------------------------------------------------------------------------
+# 0. Progressive Tool Discovery & Context-Window Budget Manager
+# ---------------------------------------------------------------------------
+@mcp.tool(
+    tags={"discovery", "core", "catalog", "search"},
+    annotations=ToolAnnotations(
+        title="SoundBoost Progressive Tool Discovery, BM25 Search & Pack Activator",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
+async def soundboost_discover_tools(
+    action: str = "catalog",
+    query: str | None = None,
+    pack: str | None = None,
+    tool_names: list[str] | None = None,
+    account_tier: str | None = None,
+    output_format: str = "markdown",
+    max_results: int = 5,
+    unlock_matches: bool = True,
+    call_arguments: dict[str, Any] | None = None,
+    ctx: Context | None = None,
+) -> Any:
+    """Progressive tool discovery & context-window budget manager for SoundBoost MCP.
+    Keeps each agent's context window compact (~83% smaller initial `list_tools()`) by loading
+    domain tool packs on demand or syncing visible tools to the user's exact SoundBoost account level:
+    - `catalog`: List all 8 tool packs (`core`, `free_tools`, `studio_harmony`, `studio_stems`, `distribution`, `mastering`, `bulk_mastering`, `music_video_shoots`), their active state, tool names, and required tier.
+    - `search`: Search all 23 tools using BM25 Okapi natural-language ranking (`query`), returning compact Markdown (`~70%` fewer tokens) or JSON schemas and optionally auto-unlocking matched tools in `list_tools()`.
+    - `activate_pack`: Enable one or more tool packs (`pack='mastering'`, `'studio_stems,studio_harmony'`, or `'all'`) or individual `tool_names`, and notify the MCP client via `notifications/tools/list_changed`.
+    - `deactivate_pack`: Unload one or more tool packs (`pack='mastering'`) or `tool_names` when a task phase finishes to shrink the context window.
+    - `sync_account_tier`: Resolve the user's SoundBoost account tier (`free`, `pay_as_you_go`, `starter`, `unlimited`, `creator`, `director`, `unlimited_plus`, `studio`) and enable ONLY the tool packs unlocked for that tier.
+    - `reset`: Collapse `list_tools()` back down to the 4 Pinned Entry Tools (`core` pack).
+    - `call`: Directly invoke any tool (`query` or first `tool_names` entry) with `call_arguments`.
+    """
+    act = action.strip().lower()
+
+    if act == "catalog":
+        visible = PROGRESSIVE_DISCOVERY.get_visible_tool_names()
+        packs_summary = {}
+        for pack_id, spec in MCP_TOOL_PACKS.items():
+            pack_tools = list(spec.get("tools", ()))  # type: ignore[arg-type]
+            packs_summary[pack_id] = {
+                "title": spec.get("title"),
+                "min_tier": spec.get("min_tier"),
+                "always_pinned": spec.get("always_pinned", False),
+                "active": pack_id in PROGRESSIVE_DISCOVERY.active_packs or PROGRESSIVE_DISCOVERY.mode == "all",
+                "summary": spec.get("summary"),
+                "tools": pack_tools,
+            }
+        return {
+            "discovery_mode": PROGRESSIVE_DISCOVERY.mode,
+            "active_packs": sorted(PROGRESSIVE_DISCOVERY.active_packs),
+            "visible_tool_count": len(visible),
+            "total_catalog_tools": sum(len(v.get("tools", ())) for v in MCP_TOOL_PACKS.values()),  # type: ignore[arg-type]
+            "visible_tools": sorted(visible),
+            "packs": packs_summary,
+        }
+
+    if act == "search":
+        if not query or not query.strip():
+            raise ValueError("query is required for action='search'")
+        return await PROGRESSIVE_DISCOVERY.search_catalog(
+            ctx,
+            query.strip(),
+            max_results=max_results,
+            output_format=output_format,
+            unlock_matches=unlock_matches,
+        )
+
+    if act in {"activate_pack", "activate", "enable"}:
+        if pack:
+            requested = [p.strip().lower() for p in pack.split(",") if p.strip()]
+            if "all" in requested:
+                PROGRESSIVE_DISCOVERY.mode = "all"
+                PROGRESSIVE_DISCOVERY.active_packs = set(MCP_TOOL_PACKS.keys())
+            else:
+                invalid = [p for p in requested if p not in MCP_TOOL_PACKS]
+                if invalid:
+                    raise ValueError(f"Unknown pack(s) {invalid}. Valid packs: {sorted(MCP_TOOL_PACKS)}")
+                PROGRESSIVE_DISCOVERY.mode = "progressive"
+                PROGRESSIVE_DISCOVERY.active_packs.update(requested)
+        if tool_names:
+            PROGRESSIVE_DISCOVERY.active_tool_names.update(t.strip() for t in tool_names if t.strip())
+        await _notify_tool_list_changed(ctx)
+        visible = PROGRESSIVE_DISCOVERY.get_visible_tool_names()
+        return {
+            "discovery_mode": PROGRESSIVE_DISCOVERY.mode,
+            "active_packs": sorted(PROGRESSIVE_DISCOVERY.active_packs),
+            "visible_tool_count": len(visible),
+            "visible_tools": sorted(visible),
+        }
+
+    if act in {"deactivate_pack", "deactivate", "disable"}:
+        PROGRESSIVE_DISCOVERY.mode = "progressive"
+        if pack:
+            requested = [p.strip().lower() for p in pack.split(",") if p.strip() and p.strip().lower() != "core"]
+            for p in requested:
+                PROGRESSIVE_DISCOVERY.active_packs.discard(p)
+        if tool_names:
+            for t in tool_names:
+                PROGRESSIVE_DISCOVERY.active_tool_names.discard(t.strip())
+        await _notify_tool_list_changed(ctx)
+        visible = PROGRESSIVE_DISCOVERY.get_visible_tool_names()
+        return {
+            "discovery_mode": PROGRESSIVE_DISCOVERY.mode,
+            "active_packs": sorted(PROGRESSIVE_DISCOVERY.active_packs),
+            "visible_tool_count": len(visible),
+            "visible_tools": sorted(visible),
+        }
+
+    if act == "reset":
+        PROGRESSIVE_DISCOVERY.mode = "progressive"
+        PROGRESSIVE_DISCOVERY.active_packs = {"core"}
+        PROGRESSIVE_DISCOVERY.active_tool_names.clear()
+        await _notify_tool_list_changed(ctx)
+        visible = PROGRESSIVE_DISCOVERY.get_visible_tool_names()
+        return {
+            "discovery_mode": PROGRESSIVE_DISCOVERY.mode,
+            "active_packs": sorted(PROGRESSIVE_DISCOVERY.active_packs),
+            "visible_tool_count": len(visible),
+            "visible_tools": sorted(visible),
+        }
+
+    if act == "sync_account_tier":
+        if account_tier:
+            ent = resolve_account_entitlements(override_tier=account_tier, is_authenticated=account_tier != "free")
+        else:
+            client = SoundBoostClient()
+            ent = client.get_my_entitlements()
+        resolved_tier = str(ent.get("resolved_tier") or ent.get("tier") or "free")
+        unlocked_packs = set(TIER_UNLOCKED_MCP_PACKS.get(resolved_tier, TIER_UNLOCKED_MCP_PACKS["free"]))
+        PROGRESSIVE_DISCOVERY.mode = "progressive"
+        PROGRESSIVE_DISCOVERY.active_packs = unlocked_packs
+        PROGRESSIVE_DISCOVERY.active_tool_names.clear()
+        await _notify_tool_list_changed(ctx)
+        visible = PROGRESSIVE_DISCOVERY.get_visible_tool_names()
+        return {
+            "resolved_tier": resolved_tier,
+            "active_packs": sorted(PROGRESSIVE_DISCOVERY.active_packs),
+            "visible_tool_count": len(visible),
+            "visible_tools": sorted(visible),
+            "entitlements": ent.get("entitlements", ent),
+        }
+
+    if act == "call":
+        target_tool = (query or (tool_names[0] if tool_names else "")).strip()
+        if not target_tool or target_tool == "soundboost_discover_tools":
+            raise ValueError("Specify a valid target tool name in `query` or `tool_names[0]` for action='call'")
+        if ctx is not None:
+            return await ctx.fastmcp.call_tool(target_tool, call_arguments or {})
+        return await mcp.call_tool(target_tool, call_arguments or {})
+
+    raise ValueError(f"Unsupported action '{action}'")
 
 
 # ---------------------------------------------------------------------------
@@ -1421,6 +1697,22 @@ def soundboost_account_profile_and_billing(
 # ---------------------------------------------------------------------------
 # 3. MCP Resources & Prompts
 # ---------------------------------------------------------------------------
+@mcp.resource(
+    "soundboost://specs/tool-packs",
+    name="SoundBoost Progressive MCP Tool Discovery Packs",
+    description="Directory of all 8 modular SoundBoost MCP tool packs and account-tier pack mappings for progressive context-window loading.",
+    mime_type="application/json",
+)
+def resource_tool_packs() -> str:
+    return json.dumps(
+        {
+            "tool_packs": MCP_TOOL_PACKS,
+            "tier_unlocked_packs": TIER_UNLOCKED_MCP_PACKS,
+        },
+        indent=2,
+    )
+
+
 @mcp.resource(
     "soundboost://specs/capabilities",
     name="SoundBoost Platform Capabilities Matrix",
