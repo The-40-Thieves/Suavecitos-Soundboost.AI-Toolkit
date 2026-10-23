@@ -252,3 +252,109 @@ MV_CHARACTER_REF_CAPS: Final[dict[str, int]] = {
     "director": 2,
     "studio": 3,
 }
+
+# ---------------------------------------------------------------------------
+# LAME Gapless MP3 Calibration Constants (Studio Modules 590-591)
+# ---------------------------------------------------------------------------
+MP3_SAMPLES_PER_FRAME_MPEG1: Final[int] = 1152
+MP3_SAMPLES_PER_FRAME_MPEG2: Final[int] = 576
+MP3_DEFAULT_DECODER_DELAY_SAMPLES: Final[int] = 529
+LAME_DEFAULT_ENCODER_DELAY_SAMPLES: Final[int] = 576
+LAME_TOTAL_PRIMING_SAMPLES: Final[int] = 1105  # 576 encoder + 529 decoder delay
+
+# ---------------------------------------------------------------------------
+# Studio Practice Mode Chord Intervals & Standard Tunings (Module 534)
+# ---------------------------------------------------------------------------
+CHORD_QUALITY_INTERVALS: Final[dict[str, tuple[int, ...]]] = {
+    "": (0, 4, 7),
+    "maj": (0, 4, 7),
+    "M": (0, 4, 7),
+    "m": (0, 3, 7),
+    "min": (0, 3, 7),
+    "-": (0, 3, 7),
+    "7": (0, 4, 7, 10),
+    "maj7": (0, 4, 7, 11),
+    "M7": (0, 4, 7, 11),
+    "m7": (0, 3, 7, 10),
+    "min7": (0, 3, 7, 10),
+    "mM7": (0, 3, 7, 11),
+    "dim": (0, 3, 6),
+    "dim7": (0, 3, 6, 9),
+    "m7b5": (0, 3, 6, 10),
+    "aug": (0, 4, 8),
+    "+": (0, 4, 8),
+    "sus2": (0, 2, 7),
+    "sus4": (0, 5, 7),
+    "7sus4": (0, 5, 7, 10),
+    "6": (0, 4, 7, 9),
+    "m6": (0, 3, 7, 9),
+    "9": (0, 4, 7, 10, 14),
+    "maj9": (0, 4, 7, 11, 14),
+    "m9": (0, 3, 7, 10, 14),
+    "add9": (0, 4, 7, 14),
+    "5": (0, 7),
+}
+
+# Standard Guitar 6-string open-position voicing templates: (E2, A2, D3, G3, B3, E4)
+# -1 = muted string, 0 = open string
+GUITAR_CHORD_SHAPES: Final[dict[str, dict[str, object]]] = {
+    "C": {"frets": (-1, 3, 2, 0, 1, 0), "fingers": (0, 3, 2, 0, 1, 0), "base_fret": 1, "barres": ()},
+    "Cm": {"frets": (-1, 3, 5, 5, 4, 3), "fingers": (0, 1, 3, 4, 2, 1), "base_fret": 3, "barres": (3,)},
+    "C7": {"frets": (-1, 3, 2, 3, 1, 0), "fingers": (0, 3, 2, 4, 1, 0), "base_fret": 1, "barres": ()},
+    "Cmaj7": {"frets": (-1, 3, 2, 0, 0, 0), "fingers": (0, 3, 2, 0, 0, 0), "base_fret": 1, "barres": ()},
+    "Cm7": {"frets": (-1, 3, 5, 3, 4, 3), "fingers": (0, 1, 3, 1, 2, 1), "base_fret": 3, "barres": (3,)},
+    "D": {"frets": (-1, -1, 0, 2, 3, 2), "fingers": (0, 0, 0, 1, 3, 2), "base_fret": 1, "barres": ()},
+    "Dm": {"frets": (-1, -1, 0, 2, 3, 1), "fingers": (0, 0, 0, 2, 3, 1), "base_fret": 1, "barres": ()},
+    "D7": {"frets": (-1, -1, 0, 2, 1, 2), "fingers": (0, 0, 0, 2, 1, 3), "base_fret": 1, "barres": ()},
+    "Dmaj7": {"frets": (-1, -1, 0, 2, 2, 2), "fingers": (0, 0, 0, 1, 1, 1), "base_fret": 1, "barres": (2,)},
+    "Dm7": {"frets": (-1, -1, 0, 2, 1, 1), "fingers": (0, 0, 0, 2, 1, 1), "base_fret": 1, "barres": (1,)},
+    "E": {"frets": (0, 2, 2, 1, 0, 0), "fingers": (0, 2, 3, 1, 0, 0), "base_fret": 1, "barres": ()},
+    "Em": {"frets": (0, 2, 2, 0, 0, 0), "fingers": (0, 2, 3, 0, 0, 0), "base_fret": 1, "barres": ()},
+    "E7": {"frets": (0, 2, 0, 1, 0, 0), "fingers": (0, 2, 0, 1, 0, 0), "base_fret": 1, "barres": ()},
+    "Emaj7": {"frets": (0, 2, 1, 1, 0, 0), "fingers": (0, 3, 1, 2, 0, 0), "base_fret": 1, "barres": ()},
+    "Em7": {"frets": (0, 2, 0, 0, 0, 0), "fingers": (0, 2, 0, 0, 0, 0), "base_fret": 1, "barres": ()},
+    "F": {"frets": (1, 3, 3, 2, 1, 1), "fingers": (1, 3, 4, 2, 1, 1), "base_fret": 1, "barres": (1,)},
+    "Fm": {"frets": (1, 3, 3, 1, 1, 1), "fingers": (1, 3, 4, 1, 1, 1), "base_fret": 1, "barres": (1,)},
+    "Fmaj7": {"frets": (-1, -1, 3, 2, 1, 0), "fingers": (0, 0, 3, 2, 1, 0), "base_fret": 1, "barres": ()},
+    "G": {"frets": (3, 2, 0, 0, 0, 3), "fingers": (2, 1, 0, 0, 0, 3), "base_fret": 1, "barres": ()},
+    "Gm": {"frets": (3, 5, 5, 3, 3, 3), "fingers": (1, 3, 4, 1, 1, 1), "base_fret": 3, "barres": (3,)},
+    "G7": {"frets": (3, 2, 0, 0, 0, 1), "fingers": (3, 2, 0, 0, 0, 1), "base_fret": 1, "barres": ()},
+    "Gmaj7": {"frets": (3, 2, 0, 0, 0, 2), "fingers": (3, 1, 0, 0, 0, 2), "base_fret": 1, "barres": ()},
+    "A": {"frets": (-1, 0, 2, 2, 2, 0), "fingers": (0, 0, 1, 2, 3, 0), "base_fret": 1, "barres": ()},
+    "Am": {"frets": (-1, 0, 2, 2, 1, 0), "fingers": (0, 0, 2, 3, 1, 0), "base_fret": 1, "barres": ()},
+    "A7": {"frets": (-1, 0, 2, 0, 2, 0), "fingers": (0, 0, 2, 0, 3, 0), "base_fret": 1, "barres": ()},
+    "Amaj7": {"frets": (-1, 0, 2, 1, 2, 0), "fingers": (0, 0, 2, 1, 3, 0), "base_fret": 1, "barres": ()},
+    "Am7": {"frets": (-1, 0, 2, 0, 1, 0), "fingers": (0, 0, 2, 0, 1, 0), "base_fret": 1, "barres": ()},
+    "B": {"frets": (-1, 2, 4, 4, 4, 2), "fingers": (0, 1, 2, 3, 4, 1), "base_fret": 2, "barres": (2,)},
+    "Bm": {"frets": (-1, 2, 4, 4, 3, 2), "fingers": (0, 1, 3, 4, 2, 1), "base_fret": 2, "barres": (2,)},
+    "B7": {"frets": (-1, 2, 1, 2, 0, 2), "fingers": (0, 2, 1, 3, 0, 4), "base_fret": 1, "barres": ()},
+    "Bb": {"frets": (-1, 1, 3, 3, 3, 1), "fingers": (0, 1, 2, 3, 4, 1), "base_fret": 1, "barres": (1,)},
+    "Eb": {"frets": (-1, 6, 8, 8, 8, 6), "fingers": (0, 1, 2, 3, 4, 1), "base_fret": 6, "barres": (6,)},
+    "Ab": {"frets": (4, 6, 6, 5, 4, 4), "fingers": (1, 3, 4, 2, 1, 1), "base_fret": 4, "barres": (4,)},
+}
+
+# Standard Ukulele 4-string voicing templates: (G4, C4, E4, A4)
+UKULELE_CHORD_SHAPES: Final[dict[str, dict[str, object]]] = {
+    "C": {"frets": (0, 0, 0, 3), "fingers": (0, 0, 0, 3), "base_fret": 1, "barres": ()},
+    "Cm": {"frets": (0, 3, 3, 3), "fingers": (0, 1, 2, 3), "base_fret": 1, "barres": ()},
+    "C7": {"frets": (0, 0, 0, 1), "fingers": (0, 0, 0, 1), "base_fret": 1, "barres": ()},
+    "Cmaj7": {"frets": (0, 0, 0, 2), "fingers": (0, 0, 0, 2), "base_fret": 1, "barres": ()},
+    "D": {"frets": (2, 2, 2, 0), "fingers": (1, 2, 3, 0), "base_fret": 1, "barres": ()},
+    "Dm": {"frets": (2, 2, 1, 0), "fingers": (2, 3, 1, 0), "base_fret": 1, "barres": ()},
+    "D7": {"frets": (2, 2, 2, 3), "fingers": (1, 1, 1, 2), "base_fret": 1, "barres": (2,)},
+    "E": {"frets": (4, 4, 4, 2), "fingers": (2, 3, 4, 1), "base_fret": 1, "barres": ()},
+    "Em": {"frets": (0, 4, 3, 2), "fingers": (0, 3, 2, 1), "base_fret": 1, "barres": ()},
+    "E7": {"frets": (1, 2, 0, 2), "fingers": (1, 2, 0, 3), "base_fret": 1, "barres": ()},
+    "F": {"frets": (2, 0, 1, 0), "fingers": (2, 0, 1, 0), "base_fret": 1, "barres": ()},
+    "Fm": {"frets": (1, 0, 1, 3), "fingers": (1, 0, 2, 4), "base_fret": 1, "barres": ()},
+    "G": {"frets": (0, 2, 3, 2), "fingers": (0, 1, 3, 2), "base_fret": 1, "barres": ()},
+    "Gm": {"frets": (0, 2, 3, 1), "fingers": (0, 2, 3, 1), "base_fret": 1, "barres": ()},
+    "G7": {"frets": (0, 2, 1, 2), "fingers": (0, 2, 1, 3), "base_fret": 1, "barres": ()},
+    "A": {"frets": (2, 1, 0, 0), "fingers": (2, 1, 0, 0), "base_fret": 1, "barres": ()},
+    "Am": {"frets": (2, 0, 0, 0), "fingers": (2, 0, 0, 0), "base_fret": 1, "barres": ()},
+    "A7": {"frets": (0, 1, 0, 0), "fingers": (0, 1, 0, 0), "base_fret": 1, "barres": ()},
+    "B": {"frets": (4, 3, 2, 2), "fingers": (3, 2, 1, 1), "base_fret": 1, "barres": (2,)},
+    "Bm": {"frets": (4, 2, 2, 2), "fingers": (3, 1, 1, 1), "base_fret": 1, "barres": (2,)},
+    "Bb": {"frets": (3, 2, 1, 1), "fingers": (3, 2, 1, 1), "base_fret": 1, "barres": (1,)},
+}
+

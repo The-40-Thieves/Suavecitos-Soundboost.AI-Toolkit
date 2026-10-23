@@ -26,15 +26,23 @@ import soundfile as sf
 from soundboost_toolkit.constants import (
     BEAT_SNAP_TOLERANCE_SEC,
     CHORD_GAP_MIN_SECONDS,
+    CHORD_QUALITY_INTERVALS,
     CHORD_ROOTS_FLAT,
     CHORD_ROOTS_SHARP,
+    GUITAR_CHORD_SHAPES,
+    LAME_DEFAULT_ENCODER_DELAY_SAMPLES,
+    LAME_TOTAL_PRIMING_SAMPLES,
     MASTERING_EQ_FREQUENCIES_HZ,
     MASTERING_EQ_MAX_DB,
     MASTERING_EQ_MIN_DB,
+    MP3_DEFAULT_DECODER_DELAY_SAMPLES,
+    MP3_SAMPLES_PER_FRAME_MPEG1,
+    MP3_SAMPLES_PER_FRAME_MPEG2,
     PITCH_NATURAL_ZONE_MAX_SEMITONES,
     PRESET_EQ_CURVES_18BAND,
     ROOT_TO_INDEX,
     STREAMING_TARGETS,
+    UKULELE_CHORD_SHAPES,
 )
 
 
@@ -726,3 +734,547 @@ def render_lead_sheet_html(
   {joined_rows}
 </body>
 </html>"""
+
+
+# ---------------------------------------------------------------------------
+# Gap 1 (Local): Cohesive Batch Album / Folder Mastering Engine
+# ---------------------------------------------------------------------------
+def master_album_folder(
+    input_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    preset: str = "pop",
+    eq_gains_db: list[float] | None = None,
+    stereo_width_pct: float = 100.0,
+    target_lufs: float = -14.0,
+    true_peak_ceiling_dbtp: float = -1.0,
+    bit_depth: int = 24,
+    apply_tpdf_dither: bool = True,
+    album_title: str | None = None,
+    artist_name: str | None = None,
+) -> dict[str, Any]:
+    """Batch-master an entire album/EP directory to a cohesive LUFS target, -1.0 dBTP ceiling, and sequential track numbers."""
+    from soundboost_toolkit.tagging import write_audio_tags
+
+    in_folder = Path(input_dir).expanduser().resolve()
+    if not in_folder.exists() or not in_folder.is_dir():
+        raise FileNotFoundError(f"Album input directory not found: {in_folder}")
+
+    out_folder = Path(output_dir).expanduser().resolve()
+    out_folder.mkdir(parents=True, exist_ok=True)
+
+    supported_exts = {".wav", ".flac", ".aiff", ".aif", ".ogg", ".mp3"}
+    source_files = sorted(
+        p for p in in_folder.iterdir() if p.is_file() and p.suffix.lower() in supported_exts
+    )
+    if not source_files:
+        raise ValueError(f"No supported audio files found in {in_folder}")
+
+    total_tracks = len(source_files)
+    track_results: list[dict[str, Any]] = []
+    lufs_values: list[float] = []
+    tp_values: list[float] = []
+
+    for idx, src_path in enumerate(source_files, start=1):
+        stem_clean = re.sub(r"^\d+[\s._-]+", "", src_path.stem).strip() or src_path.stem
+        out_name = f"{idx:02d}_{stem_clean}_master.wav"
+        out_path = out_folder / out_name
+
+        render_res = render_18band_master(
+            input_path=src_path,
+            output_path=out_path,
+            eq_gains_db=eq_gains_db,
+            preset=None if eq_gains_db else preset,
+            stereo_width_pct=stereo_width_pct,
+            target_lufs=target_lufs,
+            true_peak_ceiling_dbtp=true_peak_ceiling_dbtp,
+            bit_depth=bit_depth,
+            apply_tpdf_dither=apply_tpdf_dither,
+        )
+        write_audio_tags(
+            file_path=out_path,
+            title=stem_clean,
+            artist=artist_name,
+            album=album_title or in_folder.name,
+            track=f"{idx}/{total_tracks}",
+            genre=preset,
+        )
+        post = render_res["post_master_audit"]
+        lufs_values.append(float(post["integrated_lufs"]))
+        tp_values.append(float(post["true_peak_dbtp"]))
+        track_results.append(
+            {
+                "track_number": f"{idx}/{total_tracks}",
+                "source_file": str(src_path),
+                "mastered_file": str(out_path),
+                "integrated_lufs": post["integrated_lufs"],
+                "true_peak_dbtp": post["true_peak_dbtp"],
+                "distrokid_ready": post["distrokid_ready"],
+            }
+        )
+
+    return {
+        "album_title": album_title or in_folder.name,
+        "artist": artist_name,
+        "input_dir": str(in_folder),
+        "output_dir": str(out_folder),
+        "total_tracks": total_tracks,
+        "preset": preset,
+        "target_lufs": target_lufs,
+        "true_peak_ceiling_dbtp": true_peak_ceiling_dbtp,
+        "album_mean_lufs": round(float(np.mean(lufs_values)), 2),
+        "album_lufs_spread_lu": round(float(np.max(lufs_values) - np.min(lufs_values)), 2),
+        "album_max_true_peak_dbtp": round(float(np.max(tp_values)), 2),
+        "all_distrokid_ready": all(bool(t["distrokid_ready"]) for t in track_results),
+        "tracks": track_results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Gap 3 (Local): Natural-Language Mastering Prompt -> 18-Band EQ Translator
+# ---------------------------------------------------------------------------
+_PROMPT_DESCRIPTOR_RULES: tuple[tuple[tuple[str, ...], dict[int, float], float, float], ...] = (
+    # (keywords, {band_index: delta_db}, stereo_width_delta_pct, lufs_delta)
+    (("sub", "808", "deep bass", "rumble", "low end"), {0: 1.8, 1: 2.2, 2: 1.8, 3: 1.0}, 0.0, 0.0),
+    (("punch", "punchy", "thump", "kick", "impact", "slam"), {2: 1.4, 3: 1.8, 4: 1.2, 5: -0.6}, 0.0, 0.5),
+    (("warm", "warmer", "warmth", "analog", "tape", "tube", "thick"), {4: 1.0, 5: 1.4, 6: 1.2, 7: 0.8, 15: -0.4, 16: -0.6}, 4.0, 0.0),
+    (("mud", "muddy", "clean low-mid", "de-mud", "boxy", "boomy"), {5: -1.4, 6: -2.0, 7: -1.8, 8: -1.0}, 0.0, 0.0),
+    (("vocal", "vocals", "forward", "presence", "clarity", "clear", "intimate"), {10: 0.8, 11: 1.4, 12: 1.8, 13: 1.5}, 0.0, 0.0),
+    (("harsh", "de-ess", "sibilance", "smooth", "tame highs", "piercing", "cymbal"), {13: -1.6, 14: -2.2, 15: -1.8}, 0.0, 0.0),
+    (("bright", "brighter", "crisp", "crispy", "sparkle", "sheen", "shimmer"), {14: 1.2, 15: 1.6, 16: 2.0, 17: 2.2}, 5.0, 0.0),
+    (("air", "airy", "open", "silky", "top end", "breath"), {16: 1.8, 17: 2.5}, 8.0, 0.0),
+    (("wide", "wider", "stereo", "spacious", "huge", "immersive"), {15: 0.6, 16: 1.0}, 25.0, 0.0),
+    (("mono", "narrow", "tight center", "focused"), {}, -25.0, 0.0),
+    (("loud", "club", "competitive", "aggressive", "festival", "maximizer"), {1: 1.2, 2: 1.4, 13: 1.0, 16: 1.2}, 8.0, 3.0),
+    (("dynamic", "natural", "gentle", "audiophile", "acoustic", "open dynamics"), {}, 0.0, -2.0),
+)
+
+
+def translate_prompt_to_18band_eq(
+    prompt: str,
+    base_preset: str = "flat",
+    base_target_lufs: float = -14.0,
+) -> dict[str, Any]:
+    """Deterministically translate a natural-language mastering prompt into an 18-band EQ curve, stereo width, and LUFS target."""
+    preset_key = base_preset.strip().lower()
+    if preset_key not in PRESET_EQ_CURVES_18BAND:
+        preset_key = "flat"
+    gains = list(PRESET_EQ_CURVES_18BAND[preset_key])
+    width_pct = 100.0
+    target_lufs = float(base_target_lufs)
+    matched_rules: list[str] = []
+
+    text_lower = prompt.strip().lower()
+    for g_key in PRESET_EQ_CURVES_18BAND:
+        if g_key != "flat" and g_key.replace("_", " ") in text_lower and preset_key == "flat":
+            gains = list(PRESET_EQ_CURVES_18BAND[g_key])
+            matched_rules.append(f"genre_base:{g_key}")
+            break
+
+    for keywords, band_deltas, width_delta, lufs_delta in _PROMPT_DESCRIPTOR_RULES:
+        if any(kw in text_lower for kw in keywords):
+            matched_rules.append(keywords[0])
+            for band_idx, delta_db in band_deltas.items():
+                gains[band_idx] = gains[band_idx] + delta_db
+            width_pct += width_delta
+            target_lufs += lufs_delta
+
+    clamped_gains = [
+        round(max(MASTERING_EQ_MIN_DB, min(MASTERING_EQ_MAX_DB, g)), 2) for g in gains
+    ]
+    clamped_width = round(max(0.0, min(200.0, width_pct)), 1)
+    clamped_lufs = round(max(-20.0, min(-7.0, target_lufs)), 2)
+
+    return {
+        "prompt": prompt,
+        "matched_descriptors": matched_rules,
+        "eq_18band_db": clamped_gains,
+        "eq_by_frequency": dict(
+            zip([f"{f}Hz" for f in MASTERING_EQ_FREQUENCIES_HZ], clamped_gains, strict=True)
+        ),
+        "recommended_stereo_width_pct": clamped_width,
+        "recommended_target_lufs": clamped_lufs,
+        "recommended_ceiling_dbtp": -1.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Gap 5A: Studio Practice Mode Chord Voicing Diagrams (Studio Module 534)
+# Supports Guitar (6-string), Ukulele (4-string), and Piano (MIDI + keyboard)
+# ---------------------------------------------------------------------------
+_CHORD_PARSE_RE = re.compile(r"^([A-G](?:#|b)?)(.*?)(?:/([A-G](?:#|b)?))?$")
+
+
+def _parse_chord_symbol(chord: str) -> tuple[str, str, str | None]:
+    cleaned = chord.strip()
+    m = _CHORD_PARSE_RE.match(cleaned)
+    if not m:
+        return "C", "", None
+    root, quality, bass = m.group(1), m.group(2).strip(), m.group(3)
+    return root, quality, bass
+
+
+def _render_fretboard_ascii(
+    chord_name: str,
+    string_names: tuple[str, ...],
+    frets: tuple[int, ...],
+    base_fret: int = 1,
+) -> str:
+    """Render a clean ASCII chord diagram for Guitar (6 strings) or Ukulele (4 strings)."""
+    lines: list[str] = [f"  {chord_name}"]
+    top_markers = "  " + " ".join(
+        "X" if f < 0 else ("O" if f == 0 else " ") for f in frets
+    )
+    lines.append(top_markers)
+    lines.append("  " + "=" * (len(frets) * 2 - 1) if base_fret == 1 else f"{base_fret:2d}" + "-" * (len(frets) * 2 - 1))
+    for fret_offset in range(4):
+        fret_num = base_fret + fret_offset
+        row_cells = [
+            "*" if f == fret_num else "|" for f in frets
+        ]
+        lines.append("  " + "-".join(row_cells))
+    lines.append("  " + " ".join(string_names))
+    return "\n".join(lines)
+
+
+def get_chord_voicing_diagram(
+    chord: str,
+    instrument: str = "guitar",
+) -> dict[str, Any]:
+    """Generate interactive Chord Voicing & Fingering Diagrams for `guitar`, `ukulele`, or `piano` (Studio Module 534)."""
+    inst = instrument.strip().lower()
+    if inst not in ("guitar", "ukulele", "piano"):
+        raise ValueError(f"Unsupported instrument '{instrument}'. Choose from: guitar, ukulele, piano")
+
+    root, quality, bass = _parse_chord_symbol(chord)
+    root_pc = ROOT_TO_INDEX.get(root, 0)
+    intervals = CHORD_QUALITY_INTERVALS.get(quality, CHORD_QUALITY_INTERVALS.get(quality.lower(), (0, 4, 7)))
+    pitch_classes = [CHORD_ROOTS_SHARP[(root_pc + iv) % 12] for iv in intervals]
+    midi_notes = [60 + root_pc + iv for iv in intervals]
+    if bass and bass in ROOT_TO_INDEX:
+        bass_midi = 48 + ROOT_TO_INDEX[bass]
+        midi_notes = [bass_midi, *midi_notes]
+
+    canonical_key = f"{root}{quality}"
+    sharp_root = CHORD_ROOTS_SHARP[root_pc]
+    flat_root = CHORD_ROOTS_FLAT[root_pc]
+
+    if inst == "piano":
+        white_keys = ("C", "D", "E", "F", "G", "A", "B")
+        active_set = set(pitch_classes)
+        ascii_keys = " | ".join(
+            f"[{n}]" if n in active_set else f" {n} " for n in CHORD_ROOTS_SHARP
+        )
+        return {
+            "chord": chord,
+            "instrument": "piano",
+            "root": root,
+            "quality": quality or "maj",
+            "bass": bass,
+            "pitch_classes": pitch_classes,
+            "midi_notes": midi_notes,
+            "white_keys_reference": list(white_keys),
+            "ascii_diagram": f"Piano ({chord}): {ascii_keys}",
+        }
+
+    shape_db = GUITAR_CHORD_SHAPES if inst == "guitar" else UKULELE_CHORD_SHAPES
+    string_names = ("E", "A", "D", "G", "B", "e") if inst == "guitar" else ("G", "C", "E", "A")
+    open_midi = (40, 45, 50, 55, 59, 64) if inst == "guitar" else (67, 60, 64, 69)
+
+    shape = (
+        shape_db.get(canonical_key)
+        or shape_db.get(f"{sharp_root}{quality}")
+        or shape_db.get(f"{flat_root}{quality}")
+    )
+
+    if shape is None:
+        # Procedural barre/movable voicing fallback
+        is_minor = quality.startswith("m") and not quality.startswith("maj")
+        if inst == "guitar":
+            offset = (root_pc - 4) % 12
+            base = max(1, offset)
+            frets = (
+                offset,
+                offset + 2,
+                offset + 2,
+                offset + (1 if not is_minor else 0),
+                offset,
+                offset,
+            )
+            fingers = (1, 3, 4, 2 if not is_minor else 1, 1, 1)
+            barres = (offset,) if offset > 0 else ()
+        else:
+            offset = root_pc % 12
+            base = max(1, offset)
+            frets = (offset, offset, offset, offset + (3 if not is_minor else 2))
+            fingers = (1, 1, 1, 4)
+            barres = (offset,) if offset > 0 else ()
+    else:
+        frets = tuple(int(x) for x in shape["frets"])  # type: ignore[index]
+        fingers = tuple(int(x) for x in shape["fingers"])  # type: ignore[index]
+        base = int(shape["base_fret"])  # type: ignore[arg-type]
+        barres = tuple(int(x) for x in shape["barres"])  # type: ignore[index]
+
+    sounding_midi = [
+        open_m + f for open_m, f in zip(open_midi, frets, strict=True) if f >= 0
+    ]
+    ascii_diag = _render_fretboard_ascii(chord, string_names, frets, base_fret=base)
+    return {
+        "chord": chord,
+        "instrument": inst,
+        "root": root,
+        "quality": quality or "maj",
+        "bass": bass,
+        "string_names": list(string_names),
+        "frets": list(frets),
+        "fingers": list(fingers),
+        "base_fret": base,
+        "barres": list(barres),
+        "pitch_classes": pitch_classes,
+        "sounding_midi_notes": sounding_midi,
+        "ascii_diagram": ascii_diag,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Gap 5B: Local Pitch-Shift & Time-Stretch Renderer (Studio Modules 594-601)
+# ---------------------------------------------------------------------------
+def _phase_vocoder_time_stretch_channel(
+    channel_data: np.ndarray,
+    speed_factor: float,
+    n_fft: int = 2048,
+    hop_length: int = 512,
+) -> np.ndarray:
+    """STFT phase-vocoder time-stretcher preserving pitch for a single channel."""
+    if abs(speed_factor - 1.0) < 1e-4:
+        return channel_data.copy()
+
+    _, _, zxx = sg.stft(
+        channel_data,
+        nperseg=n_fft,
+        noverlap=n_fft - hop_length,
+        window="hann",
+    )
+    n_bins, n_frames = zxx.shape
+    if n_frames < 2:
+        target_len = max(1, round(channel_data.shape[0] / speed_factor))
+        return sg.resample(channel_data, target_len)
+
+    time_steps = np.arange(0, n_frames - 1, speed_factor, dtype=np.float64)
+    new_zxx = np.zeros((n_bins, time_steps.size), dtype=np.complex128)
+
+    omega = 2.0 * math.pi * hop_length * np.arange(n_bins) / float(n_fft)
+    phase_acc = np.angle(zxx[:, 0])
+
+    for out_idx, t in enumerate(time_steps):
+        frame_idx = math.floor(t)
+        frac = t - frame_idx
+        f0 = zxx[:, frame_idx]
+        f1 = zxx[:, min(frame_idx + 1, n_frames - 1)]
+
+        mag = (1.0 - frac) * np.abs(f0) + frac * np.abs(f1)
+        delta_phase = np.angle(f1) - np.angle(f0) - omega
+        delta_phase = (delta_phase + math.pi) % (2.0 * math.pi) - math.pi
+        inst_freq = omega + delta_phase
+
+        new_zxx[:, out_idx] = mag * np.exp(1j * phase_acc)
+        phase_acc = phase_acc + inst_freq
+
+    _, stretched = sg.istft(
+        new_zxx,
+        nperseg=n_fft,
+        noverlap=n_fft - hop_length,
+        window="hann",
+    )
+    return stretched.astype(np.float64)
+
+
+def render_local_pitch_and_time_stretch(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    semitones: float = 0.0,
+    speed_factor: float = 1.0,
+    bit_depth: int = 24,
+) -> dict[str, Any]:
+    """Render local offline Pitch-Shifting (`semitones`, pitchFactor = 2^(st/12)) and Time-Stretching (`speed_factor`, Studio Modules 594-601)."""
+    if not (0.25 <= speed_factor <= 4.0):
+        raise ValueError("speed_factor must be between 0.25 and 4.0")
+    if not (-24.0 <= semitones <= 24.0):
+        raise ValueError("semitones must be between -24 and +24")
+
+    in_file = _validate_audio_path(input_path)
+    out_file = Path(output_path).expanduser().resolve()
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    samples, sr = sf.read(str(in_file), always_2d=True, dtype="float64")
+    pitch_factor = math.pow(2.0, float(semitones) / 12.0)
+
+    # Resampling by 1/pitch_factor scales duration by 1/pitch_factor, so to achieve
+    # final duration = orig_duration / speed_factor, the phase vocoder stretches at
+    # rate = speed_factor / pitch_factor.
+    vocoder_rate = float(speed_factor) / pitch_factor
+    stretched_channels: list[np.ndarray] = []
+    for ch in range(samples.shape[1]):
+        ch_stretched = _phase_vocoder_time_stretch_channel(samples[:, ch], vocoder_rate)
+        if abs(pitch_factor - 1.0) > 1e-4:
+            up = 1000
+            down = max(1, round(1000.0 * pitch_factor))
+            ch_out = sg.resample_poly(ch_stretched, up=up, down=down)
+        else:
+            ch_out = ch_stretched
+        stretched_channels.append(ch_out)
+
+    min_len = min(c.shape[0] for c in stretched_channels)
+    output_audio = np.column_stack([c[:min_len] for c in stretched_channels])
+    peak = float(np.max(np.abs(output_audio))) if output_audio.size > 0 else 0.0
+    if peak > 0.999:
+        output_audio *= 0.995 / peak
+
+    subtype_map = {16: "PCM_16", 24: "PCM_24", 32: "FLOAT"}
+    sf.write(str(out_file), output_audio, sr, subtype=subtype_map.get(bit_depth, "PCM_24"))
+
+    return {
+        "input_path": str(in_file),
+        "output_path": str(out_file),
+        "semitones": semitones,
+        "pitch_factor": round(pitch_factor, 6),
+        "pitch_zone": classify_pitch_shift_zone(round(semitones)),
+        "speed_factor": speed_factor,
+        "input_duration_sec": round(samples.shape[0] / float(sr), 4),
+        "output_duration_sec": round(output_audio.shape[0] / float(sr), 4),
+        "sample_rate": sr,
+        "bit_depth": bit_depth,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Gap 5C: LAME Gapless MP3 Frame Header & Decoder-Delay Inspector (Modules 590-591)
+# ---------------------------------------------------------------------------
+_MPEG1_BITRATES_KBPS = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0)
+_MPEG2_BITRATES_KBPS = (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0)
+_MPEG1_SAMPLE_RATES = (44100, 48000, 32000, 0)
+_MPEG2_SAMPLE_RATES = (22050, 24000, 16000, 0)
+_MPEG25_SAMPLE_RATES = (11025, 12000, 8000, 0)
+
+
+def inspect_mp3_gapless_headers(file_path: str | Path) -> dict[str, Any]:
+    """Inspect MP3 binary frames, Xing/Info/LAME3.100 gapless tags, encoder delay (`576`), and priming samples (`1105`, Studio Modules 590-591)."""
+    path = _validate_audio_path(file_path)
+    raw = path.read_bytes()
+    size_bytes = len(raw)
+
+    # Skip ID3v2 tag if present at start of file
+    offset = 0
+    id3v2_size = 0
+    if size_bytes >= 10 and raw[:3] == b"ID3":
+        # Synchsafe 28-bit integer size
+        id3v2_size = (
+            ((raw[6] & 0x7F) << 21)
+            | ((raw[7] & 0x7F) << 14)
+            | ((raw[8] & 0x7F) << 7)
+            | (raw[9] & 0x7F)
+        ) + 10
+        offset = min(size_bytes, id3v2_size)
+
+    # Scan for first valid MPEG Layer III frame sync (11 set bits: 0xFFE0)
+    first_frame_offset = -1
+    mpeg_version_label = "MPEG-1"
+    samples_per_frame = MP3_SAMPLES_PER_FRAME_MPEG1
+    sample_rate = 44100
+    bitrate_kbps = 128
+    channel_mode = "Stereo"
+
+    scan_limit = min(size_bytes - 4, offset + 65536)
+    for pos in range(offset, scan_limit):
+        if raw[pos] == 0xFF and (raw[pos + 1] & 0xE0) == 0xE0:
+            b1 = raw[pos + 1]
+            b2 = raw[pos + 2]
+            b3 = raw[pos + 3]
+            ver_bits = (b1 >> 3) & 0x03
+            layer_bits = (b1 >> 1) & 0x03
+            br_idx = (b2 >> 4) & 0x0F
+            sr_idx = (b2 >> 2) & 0x03
+            ch_bits = (b3 >> 6) & 0x03
+
+            # Layer III is 0b01
+            if ver_bits != 0x01 and layer_bits == 0x01 and 0 < br_idx < 15 and sr_idx < 3:
+                first_frame_offset = pos
+                if ver_bits == 0x03:
+                    mpeg_version_label = "MPEG-1"
+                    samples_per_frame = MP3_SAMPLES_PER_FRAME_MPEG1
+                    sample_rate = _MPEG1_SAMPLE_RATES[sr_idx]
+                    bitrate_kbps = _MPEG1_BITRATES_KBPS[br_idx]
+                elif ver_bits == 0x02:
+                    mpeg_version_label = "MPEG-2"
+                    samples_per_frame = MP3_SAMPLES_PER_FRAME_MPEG2
+                    sample_rate = _MPEG2_SAMPLE_RATES[sr_idx]
+                    bitrate_kbps = _MPEG2_BITRATES_KBPS[br_idx]
+                else:
+                    mpeg_version_label = "MPEG-2.5"
+                    samples_per_frame = MP3_SAMPLES_PER_FRAME_MPEG2
+                    sample_rate = _MPEG25_SAMPLE_RATES[sr_idx]
+                    bitrate_kbps = _MPEG2_BITRATES_KBPS[br_idx]
+                channel_mode = ("Stereo", "Joint Stereo", "Dual Channel", "Mono")[ch_bits]
+                break
+
+    # Inspect Xing / Info / LAME gapless header inside first frame
+    has_xing_or_info = False
+    header_tag_type: str | None = None
+    lame_version: str | None = None
+    encoder_delay_samples = LAME_DEFAULT_ENCODER_DELAY_SAMPLES
+    encoder_padding_samples = 0
+    total_frames: int | None = None
+
+    if first_frame_offset >= 0:
+        window = raw[first_frame_offset : min(size_bytes, first_frame_offset + 512)]
+        for marker in (b"Xing", b"Info"):
+            idx = window.find(marker)
+            if idx >= 0:
+                has_xing_or_info = True
+                header_tag_type = marker.decode("ascii")
+                flags_pos = idx + 4
+                cursor = flags_pos + 4
+                if cursor <= len(window):
+                    flags = int.from_bytes(window[flags_pos:cursor], "big")
+                    if flags & 0x01 and cursor + 4 <= len(window):
+                        total_frames = int.from_bytes(window[cursor : cursor + 4], "big")
+                        cursor += 4
+                    if flags & 0x02:
+                        cursor += 4
+                    if flags & 0x04:
+                        cursor += 100
+                    if flags & 0x08:
+                        cursor += 4
+                    # LAME 9-byte version string + 24-bit gapless delay/padding at +21 bytes from LAME tag start
+                    lame_pos = window.find(b"LAME", idx)
+                    if lame_pos >= 0 and lame_pos + 24 <= len(window):
+                        lame_version = window[lame_pos : lame_pos + 9].decode("latin1", errors="ignore").strip()
+                        b_delay = window[lame_pos + 21 : lame_pos + 24]
+                        encoder_delay_samples = (b_delay[0] << 4) | (b_delay[1] >> 4)
+                        encoder_padding_samples = ((b_delay[1] & 0x0F) << 8) | b_delay[2]
+                break
+
+    total_priming_samples = encoder_delay_samples + MP3_DEFAULT_DECODER_DELAY_SAMPLES
+    return {
+        "file_path": str(path),
+        "file_size_bytes": size_bytes,
+        "id3v2_header_bytes": id3v2_size,
+        "first_frame_byte_offset": first_frame_offset,
+        "mpeg_version": mpeg_version_label,
+        "channel_mode": channel_mode,
+        "sample_rate": sample_rate,
+        "bitrate_kbps": bitrate_kbps,
+        "samples_per_frame": samples_per_frame,
+        "has_gapless_xing_info_header": has_xing_or_info,
+        "gapless_header_type": header_tag_type,
+        "lame_version": lame_version,
+        "total_frames_reported": total_frames,
+        "encoder_delay_samples": encoder_delay_samples,
+        "decoder_delay_samples": MP3_DEFAULT_DECODER_DELAY_SAMPLES,
+        "total_priming_samples": total_priming_samples,
+        "lame_standard_priming_samples": LAME_TOTAL_PRIMING_SAMPLES,
+        "encoder_padding_samples": encoder_padding_samples,
+        "priming_offset_ms": round(total_priming_samples * 1000.0 / float(max(1, sample_rate)), 3),
+    }
+

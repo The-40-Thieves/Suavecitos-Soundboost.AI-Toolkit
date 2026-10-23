@@ -45,6 +45,13 @@ Every tool includes full **`ToolAnnotations`** (`title`, `readOnlyHint`, `destru
 | **`soundboost_smart_links`** | `readOnly=False`, `openWorld=True` | Sync | List, auto-scrape DSP metadata, create, update, and publish `https://soundboo.st/<slug>` Smart Links. |
 | **`soundboost_text_to_audio_and_mv_budget`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Generate AI Text-to-Audio / SFX and compute AI Music Video (`h3-max`) credit spending caps (`ec(quote)` formula). |
 | **`soundboost_oauth_and_vault`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Manage Google OAuth 2.0 PKCE (`S256`), `POST /api/google-login/` token exchange, OS Keyring (`WinVaultKeyring` / macOS Keychain / SecretService), and local loopback browser session handoff. |
+| **`soundboost_bulk_and_album_mastering`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Batch-master an entire Album/EP either locally (`master_local_folder` with unified LUFS, `-1.0 dBTP` ceiling, and sequential track tags) or via SoundBoost Cloud (`/api/bulk-mastering/*` + `.zip` export). |
+| **`soundboost_youtube_and_soundcloud_ingest`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Ingest tracks directly from YouTube or SoundCloud URLs into Mastering (`/api/tracks/import-youtube/`, `/import-soundcloud/`) or Studio Stem Splitter (`/api/studio/public/import-youtube`, `/import-soundcloud`). |
+| **`soundboost_voice_and_prompt_assistant`** | `readOnly=False`, `openWorld=True` | Sync | Translate natural-language or spoken mastering instructions into 18-Band EQ curves, stereo width, and LUFS targets locally (`local_prompt_to_eq`) or via Cloud `Toki` (`/api/ai/prompt`) & `Deepgram` Voice Mastering (`/api/mastering-voice/*`). |
+| **`soundboost_music_video_and_shoots_director`** | `readOnly=False`, `openWorld=True` | **`TaskConfig(mode="optional")`** | Orchestrate AI Music Video (`h3-max`) projects (`/api/music-videos/`), `Shoots` storyboard scenes (`/api/shoots/`), natural-language Director Chat (`/director-message`), Auto-QC scene regeneration (`/scenes/regenerate-all`), Spotify 9:16 Canvas clips (`/api/video-clips/`), and `shoots.soundboost.ai` Google SSO handoff URLs. |
+| **`studio_practice_voicings_and_local_shifter`** | `readOnly=False`, `openWorld=False` | **`TaskConfig(mode="optional")`** | Generate interactive Chord Voicing & Fingering Diagrams (`guitar` 6-string, `ukulele` 4-string, `piano` MIDI/keys, Module 534), render local offline Pitch-Shifting & Phase-Vocoder Time-Stretching (Modules 594–601), and inspect binary LAME/Xing/Info Gapless MP3 headers (`1152` frame samples, `576` encoder delay, `1105` priming samples, Modules 590–591). |
+| **`soundboost_track_lifecycle_and_telemetry`** | `readOnly=False`, `openWorld=True` | Sync | Fetch pre/post mastering telemetry (`/api/get-master-stats`), run stem-assisted mastering prep (`/api/mastering/stem-prep`), generate waveforms, manage cover art, toggle favorites, create shareable public links, and delete tracks. |
+| **`soundboost_account_profile_and_billing`** | `readOnly=False`, `openWorld=True` | Sync | Manage artist profiles (`/api/account/profile/`), username availability, social notifications (`/api/social/notifications/`), referrals, and Stripe subscription billing (`/api/billing/info`, pause/resume, portal). |
 | **`install_reaper_jsfx_and_scripts`** | `readOnly=False`, `openWorld=False` | Sync | Install the 18-Band Mastering EQ JSFX plugin and Multitrack Stem Importer ReaScript into REAPER. |
 | **`list_soundboost_platform_capabilities`** | `readOnly=True`, `openWorld=False` | Sync | Return the complete specification matrix of EQ bands, presets, stem profiles, drum sub-stems, Converta formats, and streaming loudness targets. |
 
@@ -85,6 +92,24 @@ soundboost auth google-exchange --token "<google-id-or-access-token>"
 
 # 8. Launch OAuth 2.1 Protected Streamable HTTP MCP Server
 soundboost serve-mcp --transport http --port 8000 --oauth google
+
+# 9. Batch-Master an Entire Album/EP Folder with Unified Loudness & Track Numbering
+soundboost bulk-master ./raw_mixes ./mastered_album --preset pop --lufs -14.0 --ceiling -1.0 --album "Midnight Tapes" --artist "Suavecito"
+
+# 10. Translate Natural-Language Mastering Prompt into an 18-Band EQ Curve
+soundboost prompt-eq "warm 808 sub bass, clean muddy low-mids, crisp vocal presence, airy 15kHz top end"
+
+# 11. Render Guitar / Ukulele / Piano Chord Voicing & Fingering Diagrams (Module 534)
+soundboost voicings "Cm,Abmaj7,Eb,Bb" --instrument guitar
+
+# 12. Local Offline Pitch-Shift (+2 Semitones) & Phase-Vocoder Time-Stretch (1.15x)
+soundboost shifter input.wav shifted_24bit.wav --semitones 2 --speed 1.15 --bits 24
+
+# 13. Inspect LAME/Xing/Info Gapless MP3 Headers & 1105-Sample Priming Delay
+soundboost mp3-inspect stem_loop.mp3
+
+# 14. Ingest YouTube or SoundCloud Directly into Mastering or Studio Stem Splitter
+soundboost ingest studio-youtube --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 ```
 
 ---

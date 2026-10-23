@@ -24,8 +24,13 @@ from soundboost_toolkit.crypto import (
 from soundboost_toolkit.dsp import (
     analyze_audio_file,
     classify_pitch_shift_zone,
+    get_chord_voicing_diagram,
+    inspect_mp3_gapless_headers,
+    master_album_folder,
     quantize_loop_to_bar_beat_sixteenth,
     render_18band_master,
+    render_local_pitch_and_time_stretch,
+    translate_prompt_to_18band_eq,
     transpose_chord_symbol,
 )
 from soundboost_toolkit.mcp_server import list_soundboost_platform_capabilities
@@ -413,6 +418,193 @@ def cmd_serve_mcp(
         mcp_instance.run(transport="stdio")
     else:
         mcp_instance.run(transport=transport.strip().lower(), host=host, port=port)
+
+
+@app.command("bulk-master")
+def cmd_bulk_master(
+    input_dir: str = typer.Argument(..., help="Input album/EP directory containing audio files"),
+    output_dir: str = typer.Argument(..., help="Output directory for cohesive mastered WAVs"),
+    preset: str = typer.Option("pop", "--preset", "-p", help="Genre preset"),
+    target_lufs: float = typer.Option(-14.0, "--lufs", "-l", help="Unified Album Target Integrated LUFS"),
+    ceiling: float = typer.Option(-1.0, "--ceiling", "-c", help="True-Peak brickwall ceiling in dBTP"),
+    width: float = typer.Option(100.0, "--width", "-w", help="Mid/Side stereo width %"),
+    bits: int = typer.Option(24, "--bits", "-b", help="Output WAV bit depth (16, 24, 32)"),
+    album: str | None = typer.Option(None, "--album", help="Album title tag"),
+    artist: str | None = typer.Option(None, "--artist", help="Artist name tag"),
+) -> None:
+    """Batch-master an entire album/EP directory to a unified LUFS target, -1.0 dBTP ceiling & sequential track numbers."""
+    res = master_album_folder(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        preset=preset,
+        stereo_width_pct=width,
+        target_lufs=target_lufs,
+        true_peak_ceiling_dbtp=ceiling,
+        bit_depth=bits,
+        album_title=album,
+        artist_name=artist,
+    )
+    console.print_json(data=res)
+
+
+@app.command("ingest")
+def cmd_ingest(
+    source_type: str = typer.Argument(
+        ...,
+        help="mastering-youtube | mastering-soundcloud | studio-youtube | studio-soundcloud | studio-upload | studio-ready",
+    ),
+    url_or_path: str | None = typer.Option(None, "--url", "-u", help="YouTube/SoundCloud URL or local file path"),
+) -> None:
+    """Ingest tracks directly from YouTube, SoundCloud, or local disk into Mastering or Studio Stem Splitter."""
+    client = SoundBoostClient()
+    act = source_type.strip().lower().replace("_", "-")
+    if act == "studio-ready":
+        console.print_json(data=client.list_ready_studio_originals())
+        return
+    if not url_or_path:
+        raise typer.BadParameter("--url is required for this ingest action")
+    if act == "mastering-youtube":
+        res = client.import_youtube_for_mastering(url_or_path)
+    elif act == "mastering-soundcloud":
+        res = client.import_soundcloud_for_mastering(url_or_path)
+    elif act == "studio-youtube":
+        res = client.import_youtube_to_studio(url_or_path)
+    elif act == "studio-soundcloud":
+        res = client.import_soundcloud_to_studio(url_or_path)
+    elif act == "studio-upload":
+        res = client.upload_studio_original(url_or_path)
+    else:
+        raise typer.BadParameter(f"Unknown ingest source_type '{source_type}'")
+    console.print_json(data=res)
+
+
+@app.command("prompt-eq")
+def cmd_prompt_eq(
+    prompt: str = typer.Argument(..., help="Natural-language mastering description (e.g. 'warm 808s, clean mud, airy 15kHz')"),
+    base_preset: str = typer.Option("flat", "--preset", "-p", help="Base genre preset"),
+    target_lufs: float = typer.Option(-14.0, "--lufs", "-l", help="Base target LUFS"),
+    cloud: bool = typer.Option(False, "--cloud", help="Also query SoundBoost Cloud `/api/ai/prompt`"),
+) -> None:
+    """Translate a natural-language mastering prompt into an 18-Band EQ curve, stereo width, and LUFS target."""
+    res = translate_prompt_to_18band_eq(prompt, base_preset=base_preset, base_target_lufs=target_lufs)
+    if cloud:
+        client = SoundBoostClient()
+        res["cloud_ai_response"] = client.translate_ai_mastering_prompt(prompt)
+    console.print_json(data=res)
+
+
+@app.command("voicings")
+def cmd_voicings(
+    chords_csv: str = typer.Argument("Cm,Abmaj7,Eb,Bb", help="Comma-separated chord symbols"),
+    instrument: str = typer.Option("guitar", "--instrument", "-i", help="guitar | ukulele | piano"),
+) -> None:
+    """Generate Studio Practice Mode Chord Fingering Voicings & ASCII Diagrams for Guitar, Ukulele, or Piano (Module 534)."""
+    chords = [c.strip() for c in chords_csv.split(",") if c.strip()]
+    diagrams = [get_chord_voicing_diagram(c, instrument=instrument) for c in chords]
+    for d in diagrams:
+        console.print(Panel(str(d["ascii_diagram"]), title=f"{d['chord']} ({d['instrument'].title()})", border_style="cyan"))
+    console.print_json(data={"instrument": instrument, "voicings": diagrams})
+
+
+@app.command("shifter")
+def cmd_shifter(
+    input_path: str = typer.Argument(..., help="Input audio file path"),
+    output_path: str = typer.Argument(..., help="Output pitch/time-shifted WAV file path"),
+    semitones: float = typer.Option(0.0, "--semitones", "-s", help="Semitone shift (-24 to +24)"),
+    speed: float = typer.Option(1.0, "--speed", "-x", help="Playback speed / time-stretch factor (0.25 to 4.0)"),
+    bits: int = typer.Option(24, "--bits", "-b", help="Output WAV bit depth (16, 24, 32)"),
+) -> None:
+    """Render local offline Pitch-Shifting (`2^(st/12)`) and Phase-Vocoder Time-Stretching (Studio Modules 594-601)."""
+    res = render_local_pitch_and_time_stretch(
+        input_path=input_path,
+        output_path=output_path,
+        semitones=semitones,
+        speed_factor=speed,
+        bit_depth=bits,
+    )
+    console.print_json(data=res)
+
+
+@app.command("mp3-inspect")
+def cmd_mp3_inspect(
+    file_path: str = typer.Argument(..., help="Path to MP3 file"),
+) -> None:
+    """Inspect binary MP3 frame headers, LAME/Xing/Info gapless delay (`576`), and priming samples (`1105`, Modules 590-591)."""
+    console.print_json(data=inspect_mp3_gapless_headers(file_path))
+
+
+@app.command("shoots")
+def cmd_shoots(
+    action: str = typer.Argument(
+        "sso-url",
+        help="sso-url | list-mv | list-shoots | get-shoot | director-msg | regen-all | list-clips",
+    ),
+    target_id: str | None = typer.Option(None, "--id", help="Shoot ID or Music Video ID"),
+    message: str | None = typer.Option(None, "--message", "-m", help="Director Chat instruction"),
+) -> None:
+    """Manage AI Music Video (`h3-max`), `Shoots` Director Chat, and `shoots.soundboost.ai` SSO."""
+    client = SoundBoostClient()
+    act = action.strip().lower().replace("_", "-")
+    if act == "sso-url":
+        console.print_json(
+            data={
+                "shoots_google_sso_url": client.build_shoots_google_sso_url(),
+                "shoots_portal": "https://shoots.soundboost.ai",
+            }
+        )
+    elif act == "list-mv":
+        console.print_json(data=client.list_music_videos())
+    elif act == "list-shoots":
+        console.print_json(data=client.list_shoots())
+    elif act == "get-shoot":
+        if not target_id:
+            raise typer.BadParameter("--id is required for get-shoot")
+        console.print_json(data=client.get_shoot(target_id))
+    elif act == "director-msg":
+        if not target_id or not message:
+            raise typer.BadParameter("--id and --message are required for director-msg")
+        console.print_json(data=client.send_shoot_director_message(target_id, message))
+    elif act == "regen-all":
+        if not target_id:
+            raise typer.BadParameter("--id is required for regen-all")
+        console.print_json(data=client.regenerate_all_shoot_scenes(target_id))
+    elif act == "list-clips":
+        console.print_json(data=client.list_video_clips())
+    else:
+        raise typer.BadParameter(f"Unknown shoots action '{action}'")
+
+
+@app.command("account")
+def cmd_account(
+    action: str = typer.Argument(
+        "billing",
+        help="profile | billing | products | notifications | unread | referral | check-username",
+    ),
+    username: str | None = typer.Option(None, "--username", "-u", help="Username to inspect or check"),
+) -> None:
+    """Inspect SoundBoost Artist Profile, Social Notifications, Referrals & Subscription Billing."""
+    client = SoundBoostClient()
+    act = action.strip().lower().replace("_", "-")
+    if act == "profile":
+        res = client.get_public_artist_profile(username) if username else client.get_account_profile()
+    elif act == "billing":
+        res = client.get_billing_info()
+    elif act == "products":
+        res = {"products": client.get_products()}
+    elif act == "notifications":
+        res = client.list_notifications()
+    elif act == "unread":
+        res = client.get_unread_notifications_count()
+    elif act == "referral":
+        res = client.get_referral_info()
+    elif act == "check-username":
+        if not username:
+            raise typer.BadParameter("--username is required for check-username")
+        res = client.check_username_availability(username)
+    else:
+        raise typer.BadParameter(f"Unknown account action '{action}'")
+    console.print_json(data=res)
+
 
 
 if __name__ == "__main__":

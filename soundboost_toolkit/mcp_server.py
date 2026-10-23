@@ -47,10 +47,15 @@ from soundboost_toolkit.dsp import (
     analyze_audio_file,
     build_lead_sheet_rows,
     classify_pitch_shift_zone,
+    get_chord_voicing_diagram,
+    inspect_mp3_gapless_headers,
+    master_album_folder,
     quantize_loop_to_bar_beat_sixteenth,
     render_18band_master,
     render_lead_sheet_html,
+    render_local_pitch_and_time_stretch,
     snap_timestamp_to_synchronized_beat,
+    translate_prompt_to_18band_eq,
     transpose_chord_symbol,
 )
 from soundboost_toolkit.oauth import (
@@ -975,6 +980,504 @@ def list_soundboost_platform_capabilities() -> dict[str, Any]:
             for k, v in STREAMING_TARGETS.items()
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# 2B. New Feature Clusters (Gaps 1-7): Bulk Mastering, YouTube/SoundCloud Ingestion,
+#     Voice/Toki AI Prompt, Full Music Video & Shoots Director, Studio Practice Voicings,
+#     Local Pitch/Time-Stretch, Gapless MP3 Inspector, Track Lifecycle & Account/Billing
+# ---------------------------------------------------------------------------
+@mcp.tool(
+    tags={"mastering", "bulk", "album", "dsp"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="SoundBoost Bulk & Album Mastering Engine (Cloud & Local Folder)",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+async def soundboost_bulk_and_album_mastering(
+    action: str = "master_local_folder",
+    input_dir: str | None = None,
+    output_dir: str | None = None,
+    track_ids: list[str | int] | None = None,
+    batch_id: str | int | None = None,
+    mode: str = "auto",
+    preset: str = "pop",
+    prompt: str | None = None,
+    target_lufs: float = -14.0,
+    true_peak_ceiling_dbtp: float = -1.0,
+    stereo_width_pct: float = 100.0,
+    bit_depth: int = 24,
+    album_title: str | None = None,
+    artist_name: str | None = None,
+    wait_for_completion: bool = False,
+    poll_interval_sec: float = 3.0,
+    max_wait_sec: float = 300.0,
+    ctx: Context | None = None,
+) -> Any:
+    """Batch-master an entire Album/EP either locally (`master_local_folder`) or via SoundBoost Cloud (`/api/bulk-mastering/*`):
+    - `master_local_folder`: Batch-master a directory of audio files locally with unified LUFS, -1.0 dBTP ceiling, 18-band EQ, and sequential track tags
+    - `cloud_start`: Start a cloud bulk mastering batch (`POST /api/bulk-mastering/start/`)
+    - `cloud_list`: List all cloud bulk mastering batches (`GET /api/bulk-mastering/batches/`)
+    - `cloud_status`: Poll cloud bulk mastering batch progress (`GET /api/bulk-mastering/batches/{id}/status/`)
+    - `cloud_export_zip`: Fetch completed multi-track ZIP archive (`GET /api/bulk-mastering/batches/{id}/export-zip/`)
+    """
+    act = action.strip().lower()
+    if act == "master_local_folder":
+        if not input_dir or not output_dir:
+            raise ValueError("input_dir and output_dir are required for action='master_local_folder'")
+        await _notify_progress(ctx, 10.0, 100.0, f"Batch-mastering local album folder: {input_dir}")
+        res = await asyncio.to_thread(
+            master_album_folder,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            preset=preset,
+            stereo_width_pct=stereo_width_pct,
+            target_lufs=target_lufs,
+            true_peak_ceiling_dbtp=true_peak_ceiling_dbtp,
+            bit_depth=bit_depth,
+            album_title=album_title,
+            artist_name=artist_name,
+        )
+        await _notify_progress(ctx, 100.0, 100.0, f"Completed album mastering ({res['total_tracks']} tracks).")
+        return res
+
+    client = SoundBoostClient()
+    if act == "cloud_start":
+        if not track_ids:
+            raise ValueError("track_ids is required for action='cloud_start'")
+        await _notify_progress(ctx, 15.0, 100.0, f"Starting cloud bulk mastering for {len(track_ids)} tracks...")
+        res = await asyncio.to_thread(
+            client.start_bulk_mastering,
+            track_ids,
+            mode=mode,
+            preset=preset,
+            prompt=prompt,
+            target_lufs=target_lufs,
+        )
+        bid = res.get("id") or res.get("batch_id")
+        if wait_for_completion and bid is not None:
+            return await _poll_until_ready(
+                ctx,
+                lambda: client.get_bulk_mastering_status(bid),
+                poll_interval_sec=poll_interval_sec,
+                max_wait_sec=max_wait_sec,
+                task_label="Cloud Bulk Mastering",
+            )
+        return res
+    if act == "cloud_list":
+        return await asyncio.to_thread(client.list_bulk_mastering_batches)
+    if act == "cloud_status":
+        if batch_id is None:
+            raise ValueError("batch_id is required for action='cloud_status'")
+        return await asyncio.to_thread(client.get_bulk_mastering_status, batch_id)
+    if act == "cloud_export_zip":
+        if batch_id is None:
+            raise ValueError("batch_id is required for action='cloud_export_zip'")
+        return await asyncio.to_thread(client.get_bulk_mastering_export_zip, batch_id)
+    raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"cloud", "youtube", "soundcloud", "ingest"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="Direct YouTube & SoundCloud Track Ingestion (Mastering & Studio)",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+async def soundboost_youtube_and_soundcloud_ingest(
+    action: str,
+    url_or_path: str | None = None,
+    job_id: str | int | None = None,
+    ctx: Context | None = None,
+) -> Any:
+    """Ingest audio directly from YouTube, SoundCloud, or local files into SoundBoost Mastering or Studio Stem Splitter:
+    - `mastering_import_youtube`: Import YouTube URL into Mastering (`POST /api/tracks/import-youtube/`)
+    - `mastering_youtube_direct_url`: Resolve direct YouTube stream URL (`GET /api/tracks/youtube-direct-url/`)
+    - `mastering_import_soundcloud`: Import SoundCloud URL into Mastering (`POST /api/tracks/import-soundcloud/`)
+    - `mastering_soundcloud_status`: Poll SoundCloud import status (`GET /api/tracks/import-soundcloud/status/`)
+    - `mastering_soundcloud_direct_url`: Resolve direct SoundCloud stream URL (`GET /api/tracks/soundcloud-direct-url/`)
+    - `studio_import_youtube`: Import YouTube URL into Studio Stem Splitter (`POST /api/studio/public/import-youtube`)
+    - `studio_import_soundcloud`: Import SoundCloud URL into Studio Stem Splitter (`POST /api/studio/public/import-soundcloud`)
+    - `studio_upload_original`: Upload local audio file to Studio Originals (`POST /api/studio/originals/upload/`)
+    - `studio_list_ready`: List all ready Studio original tracks (`GET /api/studio/originals/ready-all`)
+    """
+    client = SoundBoostClient()
+    act = action.strip().lower()
+    if act == "studio_list_ready":
+        return await asyncio.to_thread(client.list_ready_studio_originals)
+    if act == "mastering_soundcloud_status":
+        if job_id is None:
+            raise ValueError("job_id is required for action='mastering_soundcloud_status'")
+        return await asyncio.to_thread(client.get_soundcloud_import_status, job_id)
+    if not url_or_path:
+        raise ValueError(f"url_or_path is required for action='{action}'")
+
+    await _notify_progress(ctx, 20.0, 100.0, f"Executing {act} for {url_or_path}...")
+    if act == "mastering_import_youtube":
+        return await asyncio.to_thread(client.import_youtube_for_mastering, url_or_path)
+    if act == "mastering_youtube_direct_url":
+        return await asyncio.to_thread(client.get_youtube_direct_url, url_or_path)
+    if act == "mastering_import_soundcloud":
+        return await asyncio.to_thread(client.import_soundcloud_for_mastering, url_or_path)
+    if act == "mastering_soundcloud_direct_url":
+        return await asyncio.to_thread(client.get_soundcloud_direct_url, url_or_path)
+    if act == "studio_import_youtube":
+        return await asyncio.to_thread(client.import_youtube_to_studio, url_or_path)
+    if act == "studio_import_soundcloud":
+        return await asyncio.to_thread(client.import_soundcloud_to_studio, url_or_path)
+    if act == "studio_upload_original":
+        return await asyncio.to_thread(client.upload_studio_original, url_or_path)
+    raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"ai", "prompt", "voice", "toki", "eq"},
+    annotations=ToolAnnotations(
+        title="Voice-Controlled AI Mastering & Natural-Language Toki Prompt Translator",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=True,
+    ),
+)
+def soundboost_voice_and_prompt_assistant(
+    action: str = "local_prompt_to_eq",
+    prompt_or_speech: str = "warm low end, clean mud, crisp vocal presence, airy 15kHz top end",
+    base_preset: str = "flat",
+    base_target_lufs: float = -14.0,
+    track_id: str | int | None = None,
+) -> dict[str, Any]:
+    """Translate natural-language or spoken mastering instructions into 18-Band EQ parameters (`Toki` & `Deepgram` Voice APIs):
+    - `local_prompt_to_eq`: Offline deterministic translator mapping natural-language vibe descriptors to an 18-band EQ curve, stereo width %, and LUFS target
+    - `cloud_ai_prompt`: Translate prompt via SoundBoost Cloud AI (`POST /api/ai/prompt`)
+    - `toki_check`: Check status of the Toki AI Mastering assistant (`GET /api/toki/check/`)
+    - `mastering_voice_token`: Acquire Deepgram token for Voice-Controlled Mastering (`POST /api/mastering-voice/deepgram-token`)
+    - `mastering_voice_speech`: Submit spoken mastering revision transcript (`POST /api/mastering-voice/speech`)
+    - `mv_voice_token`: Acquire Deepgram token for Voice-Controlled Music Video Director (`POST /api/music-video-voice/deepgram-token`)
+    """
+    act = action.strip().lower()
+    if act == "local_prompt_to_eq":
+        return translate_prompt_to_18band_eq(
+            prompt=prompt_or_speech,
+            base_preset=base_preset,
+            base_target_lufs=base_target_lufs,
+        )
+    client = SoundBoostClient()
+    if act == "cloud_ai_prompt":
+        return client.translate_ai_mastering_prompt(prompt_or_speech, track_id=track_id)
+    if act == "toki_check":
+        return client.check_toki_assistant()
+    if act == "mastering_voice_token":
+        return client.get_mastering_voice_deepgram_token()
+    if act == "mastering_voice_speech":
+        return client.send_mastering_voice_speech(prompt_or_speech, track_id=track_id)
+    if act == "mv_voice_token":
+        return client.get_music_video_voice_deepgram_token()
+    raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"cloud", "music-video", "shoots", "director"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="Full AI Music Video (h3-max) & Shoots Director Orchestrator",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+async def soundboost_music_video_and_shoots_director(
+    action: str = "shoots_sso_url",
+    video_or_shoot_id: str | int | None = None,
+    scene_id: str | int | None = None,
+    director_message: str | None = None,
+    payload: dict[str, Any] | None = None,
+    page: int = 1,
+) -> Any:
+    """Orchestrate AI Music Videos (`h3-max`), `Shoots` storyboard scenes, Director Chat, Spotify 9:16 Canvas clips, and `shoots.soundboost.ai` SSO:
+    - `shoots_sso_url`: Build cross-domain SSO URL (`https://mastering.soundboost.ai/sso?provider=google&appName=shoots&gacTkn=...`) and exchange SSO token
+    - `list_music_videos`: List AI Music Video (`h3-max`) projects (`GET /api/music-videos/`)
+    - `create_music_video`: Create AI Music Video project (`POST /api/music-videos/`)
+    - `get_music_video`: Fetch AI Music Video project details (`GET /api/music-videos/{id}/`)
+    - `list_shoots`: List Shoots storyboard sessions (`GET /api/shoots/`)
+    - `create_shoot`: Create Shoot session (`POST /api/shoots/`)
+    - `get_shoot`: Fetch Shoot storyboard session (`GET /api/shoots/{id}`)
+    - `director_message`: Send natural-language Director Chat instructions (`POST /api/shoots/{id}/director-message`)
+    - `regenerate_all_scenes`: Trigger batch scene regeneration & Auto-QC retakes (`POST /api/shoots/{id}/scenes/regenerate-all`)
+    - `list_video_clips`: List vertical video clips / Spotify 9:16 Canvas exports (`GET /api/video-clips/`)
+    - `create_video_clip`: Create vertical video clip / Spotify Canvas (`POST /api/video-clips/`)
+    - `list_comments`: List `/watch-film` community comments (`GET /api/music-videos/comments/`)
+    - `post_comment`: Post comment on a music video (`POST /api/music-videos/comments/`)
+    - `following_feed`: Fetch `/watch-film` following feed (`GET /api/music-videos/following/?page=`)
+    """
+    client = SoundBoostClient()
+    act = action.strip().lower()
+    if act == "shoots_sso_url":
+        return {
+            "shoots_google_sso_url": client.build_shoots_google_sso_url(),
+            "shoots_service_url": "https://shoots.soundboost.ai",
+            "features": [
+                "Musician AI Clones (Consistent Artist Likeness)",
+                "Advanced Editorial & Press Photo Generator",
+                "Spotify 9:16 Canvas Loop Generator",
+                "3000x3000 DistroKid-Compliant Album Cover Generator",
+            ],
+        }
+    if act == "list_music_videos":
+        return await asyncio.to_thread(client.list_music_videos)
+    if act == "create_music_video":
+        return await asyncio.to_thread(client.create_music_video, payload or {})
+    if act == "get_music_video":
+        if video_or_shoot_id is None:
+            raise ValueError("video_or_shoot_id is required for action='get_music_video'")
+        return await asyncio.to_thread(client.get_music_video, video_or_shoot_id)
+    if act == "list_shoots":
+        return await asyncio.to_thread(client.list_shoots)
+    if act == "create_shoot":
+        return await asyncio.to_thread(client.create_shoot, payload or {})
+    if act == "get_shoot":
+        if video_or_shoot_id is None:
+            raise ValueError("video_or_shoot_id is required for action='get_shoot'")
+        return await asyncio.to_thread(client.get_shoot, video_or_shoot_id)
+    if act == "director_message":
+        if video_or_shoot_id is None or not director_message:
+            raise ValueError("video_or_shoot_id and director_message are required for action='director_message'")
+        return await asyncio.to_thread(
+            client.send_shoot_director_message,
+            video_or_shoot_id,
+            director_message,
+            scene_id=scene_id,
+        )
+    if act == "regenerate_all_scenes":
+        if video_or_shoot_id is None:
+            raise ValueError("video_or_shoot_id is required for action='regenerate_all_scenes'")
+        return await asyncio.to_thread(
+            client.regenerate_all_shoot_scenes, video_or_shoot_id, payload
+        )
+    if act == "list_video_clips":
+        return await asyncio.to_thread(client.list_video_clips)
+    if act == "create_video_clip":
+        return await asyncio.to_thread(client.create_video_clip, payload or {})
+    if act == "list_comments":
+        return await asyncio.to_thread(client.list_music_video_comments, video_or_shoot_id)
+    if act == "post_comment":
+        if video_or_shoot_id is None or not director_message:
+            raise ValueError("video_or_shoot_id and director_message (comment text) are required")
+        return await asyncio.to_thread(
+            client.post_music_video_comment, video_or_shoot_id, director_message
+        )
+    if act == "following_feed":
+        return await asyncio.to_thread(client.list_following_music_videos, page)
+    raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"dsp", "practice", "chords", "pitch-shift", "mp3", "gapless"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="Studio Practice Chord Voicings (Guitar/Ukulele/Piano), Local Pitch/Time-Stretch & Gapless MP3 Inspector",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    ),
+)
+async def studio_practice_voicings_and_local_shifter(
+    action: str = "chord_voicings",
+    chords: list[str] | None = None,
+    instrument: str = "guitar",
+    input_path: str | None = None,
+    output_path: str | None = None,
+    semitones: float = 0.0,
+    speed_factor: float = 1.0,
+    bit_depth: int = 24,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Local Studio Practice & Calibration tools (exact replicas of Studio Modules 534, 590-591, 594-601):
+    - `chord_voicings`: Generate interactive Chord Fingering Voicings & ASCII fretboard/keyboard diagrams for `guitar` (6-string), `ukulele` (4-string), or `piano` (MIDI + keys)
+    - `pitch_time_stretch`: Render local offline Pitch-Shifting (`semitones` in [-24, +24], pitchFactor = 2^(st/12)) and Phase-Vocoder Time-Stretching (`speed_factor` in [0.25, 4.0])
+    - `inspect_gapless_mp3`: Parse binary MP3 frames (`1152` samples/frame), `Xing`/`Info`/`LAME3.100` gapless headers, encoder delay (`576`), decoder delay (`529`), and total priming samples (`1105`)
+    """
+    act = action.strip().lower()
+    if act == "chord_voicings":
+        chord_list = chords or ["Cm", "Abmaj7", "Eb", "Bb"]
+        diagrams = [get_chord_voicing_diagram(c, instrument=instrument) for c in chord_list]
+        return {
+            "instrument": instrument.lower(),
+            "chord_count": len(diagrams),
+            "voicings": diagrams,
+        }
+    if act == "pitch_time_stretch":
+        if not input_path or not output_path:
+            raise ValueError("input_path and output_path are required for action='pitch_time_stretch'")
+        await _notify_progress(
+            ctx,
+            15.0,
+            100.0,
+            f"Rendering local pitch shift ({semitones:+.1f} st) & time stretch ({speed_factor:.2f}x)...",
+        )
+        res = await asyncio.to_thread(
+            render_local_pitch_and_time_stretch,
+            input_path=input_path,
+            output_path=output_path,
+            semitones=semitones,
+            speed_factor=speed_factor,
+            bit_depth=bit_depth,
+        )
+        await _notify_progress(ctx, 100.0, 100.0, f"Saved pitch/time-stretched audio -> {output_path}")
+        return res
+    if act == "inspect_gapless_mp3":
+        if not input_path:
+            raise ValueError("input_path is required for action='inspect_gapless_mp3'")
+        return await asyncio.to_thread(inspect_mp3_gapless_headers, input_path)
+    raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"cloud", "tracks", "telemetry", "waveform"},
+    annotations=ToolAnnotations(
+        title="SoundBoost Track Lifecycle, Mastering Telemetry & Waveform Manager",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+def soundboost_track_lifecycle_and_telemetry(
+    action: str = "master_stats",
+    track_id: str | int | None = None,
+    track_ids: list[str | int] | None = None,
+    image_path_or_url: str | None = None,
+    download_format: str = "wav",
+    public_enabled: bool = True,
+) -> Any:
+    """Manage SoundBoost tracks, pre/post mastering telemetry, stem-assisted prep, waveforms, and public links:
+    - `master_stats`: Fetch pre/post mastering loudness, peak, dynamic range & EQ telemetry (`GET /api/get-master-stats`)
+    - `stem_prep`: Run stem-assisted mastering preparation (`POST /api/mastering/stem-prep`)
+    - `song_master`: Fetch song master metadata (`GET /api/songs/{id}/master`)
+    - `song_download`: Get signed download link (`GET /api/songs/{id}/download`)
+    - `generate_waveform`: Generate waveform peak telemetry (`POST /api/waveform/generate/`)
+    - `toggle_favorite`: Toggle favorite star on a track (`POST /api/toggle-favorite/`)
+    - `update_cover_art`: Upload or assign cover art to a track (`POST /api/tracks/{id}/cover-art/`)
+    - `public_link`: Create or toggle a shareable public link (`POST /api/tracks/{id}/public-link/`)
+    - `public_tracks_by_ids`: Fetch public tracks by ID list (`GET /api/public/tracks/by-id/`)
+    - `delete_track`: Delete an uploaded source track (`POST /api/delete-track/`)
+    - `delete_mastered`: Delete a mastered track version (`POST /api/delete-mastered/`)
+    """
+    client = SoundBoostClient()
+    act = action.strip().lower()
+    if act == "public_tracks_by_ids":
+        if not track_ids:
+            raise ValueError("track_ids is required for action='public_tracks_by_ids'")
+        return client.get_public_tracks_by_ids(track_ids)
+    if track_id is None:
+        raise ValueError(f"track_id is required for action='{action}'")
+    if act == "master_stats":
+        return client.get_master_stats(track_id)
+    if act == "stem_prep":
+        return client.start_mastering_stem_prep(track_id)
+    if act == "song_master":
+        return client.get_song_master(track_id)
+    if act == "song_download":
+        return client.get_song_download(track_id, fmt=download_format)
+    if act == "generate_waveform":
+        return client.generate_waveform(track_id)
+    if act == "toggle_favorite":
+        return client.toggle_favorite_track(track_id)
+    if act == "update_cover_art":
+        if not image_path_or_url:
+            raise ValueError("image_path_or_url is required for action='update_cover_art'")
+        return client.update_track_cover_art(track_id, image_path_or_url)
+    if act == "public_link":
+        return client.create_track_public_link(track_id, enabled=public_enabled)
+    if act == "delete_track":
+        return client.delete_track(track_id)
+    if act == "delete_mastered":
+        return client.delete_mastered_track(track_id)
+    raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"cloud", "account", "profile", "notifications", "billing"},
+    annotations=ToolAnnotations(
+        title="SoundBoost Artist Profile, Social Notifications & Subscription Billing Manager",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+def soundboost_account_profile_and_billing(
+    action: str = "billing_info",
+    username: str | None = None,
+    product_id: str | int | None = None,
+    notification_ids: list[str | int] | None = None,
+    payload: dict[str, Any] | None = None,
+    page: int = 1,
+) -> Any:
+    """Manage SoundBoost Artist Profile, Social Notifications, Referrals & Subscription Billing:
+    - `get_profile`: Fetch authenticated artist profile (`GET /api/account/profile/`)
+    - `update_profile`: Update authenticated artist profile (`PATCH /api/account/profile/`)
+    - `check_username`: Check handle availability (`GET /api/account/profile/username-availability/`)
+    - `public_profile`: Fetch public profile by username (`GET /api/public/profiles/{username}/`)
+    - `notifications`: List social notifications (`GET /api/social/notifications/?page=`)
+    - `unread_count`: Get unread notification count (`GET /api/social/notifications/unread-count/`)
+    - `mark_read`: Mark notifications read (`POST /api/social/notifications/read/`)
+    - `billing_info`: Fetch subscription, credit balance & billing details (`GET /api/billing/info`)
+    - `products`: List available subscription plans & credit packs (`GET /api/products/`)
+    - `checkout_session`: Create Stripe checkout session (`POST /api/create-checkout-session`)
+    - `portal_session`: Create Stripe customer billing portal session (`POST /api/create-customer-portal-session/`)
+    - `pause_subscription`: Pause active subscription (`POST /api/pause-subscription/`)
+    - `resume_subscription`: Resume paused subscription (`POST /api/resume-subscription/`)
+    - `referral_info`: Fetch artist referral link and reward stats (`GET /api/get-referral-info`)
+    """
+    client = SoundBoostClient()
+    act = action.strip().lower()
+    if act == "get_profile":
+        return client.get_account_profile()
+    if act == "update_profile":
+        return client.update_account_profile(payload or {})
+    if act == "check_username":
+        if not username:
+            raise ValueError("username is required for action='check_username'")
+        return client.check_username_availability(username)
+    if act == "public_profile":
+        if not username:
+            raise ValueError("username is required for action='public_profile'")
+        return client.get_public_artist_profile(username)
+    if act == "notifications":
+        return client.list_notifications(page=page)
+    if act == "unread_count":
+        return client.get_unread_notifications_count()
+    if act == "mark_read":
+        return client.mark_notifications_read(notification_ids)
+    if act == "billing_info":
+        return client.get_billing_info()
+    if act == "products":
+        return {"products": client.get_products()}
+    if act == "checkout_session":
+        if product_id is None:
+            raise ValueError("product_id is required for action='checkout_session'")
+        return client.create_checkout_session(product_id, extra=payload)
+    if act == "portal_session":
+        return client.create_customer_portal_session()
+    if act == "pause_subscription":
+        return client.pause_subscription()
+    if act == "resume_subscription":
+        return client.resume_subscription()
+    if act == "referral_info":
+        return client.get_referral_info()
+    raise ValueError(f"Unsupported action '{action}'")
+
 
 
 # ---------------------------------------------------------------------------

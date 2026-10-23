@@ -590,3 +590,378 @@ class SoundBoostClient:
         """List community Text-to-Audio generations (`GET /api/audio/public/list/?page={page}`)."""
         url = f"{self.backend_url}/api/audio/public/list/"
         return dict(self._request("GET", url, params={"page": page}))
+
+    # -----------------------------------------------------------------------
+    # 7. Bulk / Album Mastering Engine (`/bulk-mastering`)
+    # -----------------------------------------------------------------------
+    def start_bulk_mastering(
+        self,
+        track_ids: list[int | str],
+        *,
+        mode: str = "auto",
+        preset: str | None = None,
+        prompt: str | None = None,
+        target_lufs: float | None = None,
+        reference_track_id: int | str | None = None,
+    ) -> dict[str, Any]:
+        """Start batch album/EP mastering (`POST /api/bulk-mastering/start/`)."""
+        payload: dict[str, Any] = {
+            "track_ids": [str(tid) for tid in track_ids],
+            "mode": mode,
+        }
+        if preset is not None:
+            payload["preset"] = preset
+        if prompt is not None:
+            payload["prompt"] = prompt
+        if target_lufs is not None:
+            payload["target_lufs"] = target_lufs
+        if reference_track_id is not None:
+            payload["reference_track_id"] = str(reference_track_id)
+        url = f"{self.backend_url}/api/bulk-mastering/start/"
+        return dict(self._request("POST", url, json_body=payload, timeout_sec=180.0))
+
+    def list_bulk_mastering_batches(self) -> Any:
+        """List all bulk mastering batches (`GET /api/bulk-mastering/batches/`)."""
+        url = f"{self.backend_url}/api/bulk-mastering/batches/"
+        return self._request("GET", url)
+
+    def get_bulk_mastering_status(self, batch_id: int | str) -> dict[str, Any]:
+        """Poll bulk mastering batch status (`GET /api/bulk-mastering/batches/{id}/status/`)."""
+        url = f"{self.backend_url}/api/bulk-mastering/batches/{batch_id}/status/"
+        return dict(self._request("GET", url))
+
+    def get_bulk_mastering_export_zip(self, batch_id: int | str) -> dict[str, Any]:
+        """Fetch or download the completed bulk mastering ZIP archive (`GET /api/bulk-mastering/batches/{id}/export-zip/`)."""
+        url = f"{self.backend_url}/api/bulk-mastering/batches/{batch_id}/export-zip/"
+        return dict(self._request("GET", url))
+
+    # -----------------------------------------------------------------------
+    # 8. Direct YouTube & SoundCloud Ingestion (Mastering & Studio)
+    # -----------------------------------------------------------------------
+    def import_youtube_for_mastering(self, youtube_url: str) -> dict[str, Any]:
+        """Import a YouTube URL directly into Mastering (`POST /api/tracks/import-youtube/`)."""
+        url = f"{self.backend_url}/api/tracks/import-youtube/"
+        return dict(self._request("POST", url, json_body={"url": youtube_url.strip()}))
+
+    def get_youtube_direct_url(self, youtube_url: str) -> dict[str, Any]:
+        """Resolve a direct audio stream URL from YouTube (`GET /api/tracks/youtube-direct-url/`)."""
+        url = f"{self.backend_url}/api/tracks/youtube-direct-url/"
+        return dict(self._request("GET", url, params={"url": youtube_url.strip()}))
+
+    def import_soundcloud_for_mastering(self, soundcloud_url: str) -> dict[str, Any]:
+        """Import a SoundCloud URL directly into Mastering (`POST /api/tracks/import-soundcloud/`)."""
+        url = f"{self.backend_url}/api/tracks/import-soundcloud/"
+        return dict(self._request("POST", url, json_body={"url": soundcloud_url.strip()}))
+
+    def get_soundcloud_import_status(self, job_id: str | int) -> dict[str, Any]:
+        """Poll SoundCloud import job status (`GET /api/tracks/import-soundcloud/status/`)."""
+        url = f"{self.backend_url}/api/tracks/import-soundcloud/status/"
+        return dict(self._request("GET", url, params={"id": job_id, "job_id": job_id}))
+
+    def get_soundcloud_direct_url(self, soundcloud_url: str) -> dict[str, Any]:
+        """Resolve a direct audio stream URL from SoundCloud (`GET /api/tracks/soundcloud-direct-url/`)."""
+        url = f"{self.backend_url}/api/tracks/soundcloud-direct-url/"
+        return dict(self._request("GET", url, params={"url": soundcloud_url.strip()}))
+
+    def import_youtube_to_studio(self, youtube_url: str) -> dict[str, Any]:
+        """Import a YouTube URL directly into Studio Stem Splitter (`POST /api/studio/public/import-youtube`)."""
+        url = f"{self.backend_url}/api/studio/public/import-youtube"
+        return dict(self._request("POST", url, json_body={"url": youtube_url.strip()}))
+
+    def import_soundcloud_to_studio(self, soundcloud_url: str) -> dict[str, Any]:
+        """Import a SoundCloud URL directly into Studio Stem Splitter (`POST /api/studio/public/import-soundcloud`)."""
+        url = f"{self.backend_url}/api/studio/public/import-soundcloud"
+        return dict(self._request("POST", url, json_body={"url": soundcloud_url.strip()}))
+
+    def upload_studio_original(self, file_path: str | Path) -> dict[str, Any]:
+        """Upload a local audio file directly to Studio Originals (`POST /api/studio/originals/upload/`)."""
+        resolved = Path(file_path).expanduser().resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Audio file not found: {resolved}")
+        url = f"{self.backend_url}/api/studio/originals/upload/"
+        with resolved.open("rb") as fh:
+            files = {"file": (resolved.name, fh, "application/octet-stream")}
+            return dict(self._request("POST", url, files=files, timeout_sec=300.0))
+
+    def list_ready_studio_originals(self) -> Any:
+        """List all ready Studio original tracks (`GET /api/studio/originals/ready-all`)."""
+        url = f"{self.backend_url}/api/studio/originals/ready-all"
+        return self._request("GET", url)
+
+    # -----------------------------------------------------------------------
+    # 9. Voice-Controlled AI Mastering (`Deepgram`) & `Toki` Prompt Engine
+    # -----------------------------------------------------------------------
+    def translate_ai_mastering_prompt(
+        self,
+        prompt: str,
+        track_id: int | str | None = None,
+    ) -> dict[str, Any]:
+        """Translate a natural-language mastering prompt via SoundBoost AI (`POST /api/ai/prompt`)."""
+        body: dict[str, Any] = {"prompt": prompt}
+        if track_id is not None:
+            body["track_id"] = track_id
+        url = f"{self.mastering_url}/api/ai/prompt"
+        return dict(self._request("POST", url, json_body=body))
+
+    def check_toki_assistant(self) -> dict[str, Any]:
+        """Check status/availability of the Toki AI Mastering assistant (`GET /api/toki/check/`)."""
+        url = f"{self.backend_url}/api/toki/check/"
+        return dict(self._request("GET", url))
+
+    def get_mastering_voice_deepgram_token(self) -> dict[str, Any]:
+        """Acquire a temporary Deepgram STT token for Voice-Controlled AI Mastering (`POST /api/mastering-voice/deepgram-token`)."""
+        url = f"{self.mastering_url}/api/mastering-voice/deepgram-token"
+        return dict(self._request("POST", url, json_body={}))
+
+    def send_mastering_voice_speech(
+        self,
+        transcript: str,
+        track_id: int | str | None = None,
+    ) -> dict[str, Any]:
+        """Submit spoken mastering revision instructions (`POST /api/mastering-voice/speech`)."""
+        payload: dict[str, Any] = {"text": transcript, "transcript": transcript}
+        if track_id is not None:
+            payload["track_id"] = track_id
+        url = f"{self.mastering_url}/api/mastering-voice/speech"
+        return dict(self._request("POST", url, json_body=payload))
+
+    def get_music_video_voice_deepgram_token(self) -> dict[str, Any]:
+        """Acquire a Deepgram STT token for Voice-Controlled Music Video Director (`POST /api/music-video-voice/deepgram-token`)."""
+        url = f"{self.mastering_url}/api/music-video-voice/deepgram-token"
+        return dict(self._request("POST", url, json_body={}))
+
+    # -----------------------------------------------------------------------
+    # 10. Full AI Music Video (`h3-max`) & `Shoots` Director API
+    # -----------------------------------------------------------------------
+    def list_music_videos(self) -> Any:
+        """List AI Music Video (`h3-max`) projects (`GET /api/music-videos/`)."""
+        url = f"{self.backend_url}/api/music-videos/"
+        return self._request("GET", url)
+
+    def create_music_video(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a new AI Music Video (`h3-max`) project (`POST /api/music-videos/`)."""
+        url = f"{self.backend_url}/api/music-videos/"
+        return dict(self._request("POST", url, json_body=payload))
+
+    def get_music_video(self, video_id: int | str) -> dict[str, Any]:
+        """Fetch an AI Music Video project by ID (`GET /api/music-videos/{id}/`)."""
+        url = f"{self.backend_url}/api/music-videos/{video_id}/"
+        return dict(self._request("GET", url))
+
+    def list_shoots(self) -> Any:
+        """List Shoots / Music Video storyboard sessions (`GET /api/shoots/`)."""
+        url = f"{self.backend_url}/api/shoots/"
+        return self._request("GET", url)
+
+    def create_shoot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a new Shoot / storyboard session (`POST /api/shoots/`)."""
+        url = f"{self.backend_url}/api/shoots/"
+        return dict(self._request("POST", url, json_body=payload))
+
+    def get_shoot(self, shoot_id: int | str) -> dict[str, Any]:
+        """Fetch a Shoot / storyboard session by ID (`GET /api/shoots/{id}`)."""
+        url = f"{self.mastering_url}/api/shoots/{shoot_id}"
+        return dict(self._request("GET", url))
+
+    def send_shoot_director_message(
+        self,
+        shoot_id: int | str,
+        message: str,
+        scene_id: int | str | None = None,
+    ) -> dict[str, Any]:
+        """Send natural-language Director Chat instructions to modify storyboard shots, camera motion, or visual style (`POST /api/shoots/{id}/director-message`)."""
+        body: dict[str, Any] = {"message": message}
+        if scene_id is not None:
+            body["scene_id"] = scene_id
+        url = f"{self.mastering_url}/api/shoots/{shoot_id}/director-message"
+        return dict(self._request("POST", url, json_body=body))
+
+    def regenerate_all_shoot_scenes(
+        self,
+        shoot_id: int | str,
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Trigger batch scene/shot regeneration & Auto-QC retakes (`POST /api/shoots/{id}/scenes/regenerate-all`)."""
+        url = f"{self.mastering_url}/api/shoots/{shoot_id}/scenes/regenerate-all"
+        return dict(self._request("POST", url, json_body=options or {}))
+
+    def list_video_clips(self) -> Any:
+        """List short-form vertical video clips / Spotify 9:16 Canvas exports (`GET /api/video-clips/`)."""
+        url = f"{self.backend_url}/api/video-clips/"
+        return self._request("GET", url)
+
+    def create_video_clip(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a short-form vertical video clip or Spotify 9:16 Canvas (`POST /api/video-clips/`)."""
+        url = f"{self.backend_url}/api/video-clips/"
+        return dict(self._request("POST", url, json_body=payload))
+
+    def list_music_video_comments(self, video_id: int | str | None = None) -> Any:
+        """List community `/watch-film` music video comments (`GET /api/music-videos/comments/`)."""
+        url = f"{self.backend_url}/api/music-videos/comments/"
+        params = {"video_id": video_id} if video_id is not None else None
+        return self._request("GET", url, params=params)
+
+    def post_music_video_comment(self, video_id: int | str, text: str) -> dict[str, Any]:
+        """Post a comment on a community music video (`POST /api/music-videos/comments/`)."""
+        url = f"{self.backend_url}/api/music-videos/comments/"
+        return dict(self._request("POST", url, json_body={"video_id": video_id, "text": text}))
+
+    def list_following_music_videos(self, page: int = 1) -> dict[str, Any]:
+        """Fetch `/watch-film` following feed (`GET /api/music-videos/following/?page=`)."""
+        url = f"{self.backend_url}/api/music-videos/following/"
+        return dict(self._request("GET", url, params={"page": page}))
+
+    def build_shoots_google_sso_url(self, gac_token: str | None = None) -> str:
+        """Construct the direct cross-domain SSO handoff URL for `shoots.soundboost.ai` (`AI Clones`, `Press Photos`, `Spotify Canvas`, `Cover Art`)."""
+        token = (gac_token or self.access_token or "").strip()
+        return f"{self.mastering_url}/sso?provider=google&appName=shoots&gacTkn={token}"
+
+    # -----------------------------------------------------------------------
+    # 11. Core Mastering Telemetry, Stem-Assisted Prep & Track Lifecycle
+    # -----------------------------------------------------------------------
+    def get_master_stats(self, track_id: int | str) -> dict[str, Any]:
+        """Fetch detailed pre/post mastering loudness, peak, dynamic range & EQ telemetry (`GET /api/get-master-stats`)."""
+        url = f"{self.backend_url}/api/get-master-stats"
+        return dict(self._request("GET", url, params={"track_id": track_id, "id": track_id}))
+
+    def start_mastering_stem_prep(self, track_id: int | str) -> dict[str, Any]:
+        """Run stem-assisted mastering preparation (`POST /api/mastering/stem-prep`)."""
+        url = f"{self.backend_url}/api/mastering/stem-prep"
+        return dict(self._request("POST", url, json_body={"track_id": track_id}))
+
+    def process_audio_legacy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Trigger core DSP audio processing (`POST /api/process-audio/`)."""
+        url = f"{self.backend_url}/api/process-audio/"
+        return dict(self._request("POST", url, json_body=payload))
+
+    def receive_mastering_data(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Send mastering DSP parameter updates (`POST /api/receive-data/`)."""
+        url = f"{self.backend_url}/api/receive-data/"
+        return dict(self._request("POST", url, json_body=payload))
+
+    def get_song_master(self, song_id: int | str) -> dict[str, Any]:
+        """Fetch song master metadata (`GET /api/songs/{id}/master`)."""
+        url = f"{self.backend_url}/api/songs/{song_id}/master"
+        return dict(self._request("GET", url))
+
+    def get_song_download(self, song_id: int | str, fmt: str = "wav") -> dict[str, Any]:
+        """Fetch signed download link for a mastered song (`GET /api/songs/{id}/download`)."""
+        url = f"{self.backend_url}/api/songs/{song_id}/download"
+        return dict(self._request("GET", url, params={"format": fmt}))
+
+    def delete_track(self, track_id: int | str) -> dict[str, Any]:
+        """Delete an uploaded source track (`POST /api/delete-track/`)."""
+        url = f"{self.backend_url}/api/delete-track/"
+        return dict(self._request("POST", url, json_body={"track_id": track_id, "id": track_id}))
+
+    def delete_mastered_track(self, track_id: int | str) -> dict[str, Any]:
+        """Delete a mastered track version (`POST /api/delete-mastered/`)."""
+        url = f"{self.backend_url}/api/delete-mastered/"
+        return dict(self._request("POST", url, json_body={"track_id": track_id, "id": track_id}))
+
+    def toggle_favorite_track(self, track_id: int | str) -> dict[str, Any]:
+        """Toggle favorite status on a track (`POST /api/toggle-favorite/`)."""
+        url = f"{self.backend_url}/api/toggle-favorite/"
+        return dict(self._request("POST", url, json_body={"track_id": track_id, "id": track_id}))
+
+    def update_track_cover_art(self, track_id: int | str, image_path_or_url: str) -> dict[str, Any]:
+        """Upload or assign cover art to a track (`POST /api/tracks/{id}/cover-art/`)."""
+        url = f"{self.backend_url}/api/tracks/{track_id}/cover-art/"
+        candidate = Path(image_path_or_url).expanduser()
+        if candidate.exists() and candidate.is_file():
+            with candidate.open("rb") as fh:
+                files = {"file": (candidate.name, fh, "application/octet-stream")}
+                return dict(self._request("POST", url, files=files))
+        return dict(self._request("POST", url, json_body={"cover_url": image_path_or_url}))
+
+    def create_track_public_link(self, track_id: int | str, enabled: bool = True) -> dict[str, Any]:
+        """Create or toggle a shareable public link for a track (`POST /api/tracks/{id}/public-link/`)."""
+        url = f"{self.backend_url}/api/tracks/{track_id}/public-link/"
+        return dict(self._request("POST", url, json_body={"enabled": enabled}))
+
+    def get_public_tracks_by_ids(self, track_ids: list[int | str]) -> Any:
+        """Fetch public tracks by IDs (`GET /api/public/tracks/by-id/`)."""
+        joined = ",".join(str(tid) for tid in track_ids)
+        url = f"{self.backend_url}/api/public/tracks/by-id/"
+        return self._request("GET", url, params={"ids": joined})
+
+    def generate_waveform(self, track_id: int | str) -> dict[str, Any]:
+        """Generate waveform peak telemetry for a track (`POST /api/waveform/generate/`)."""
+        url = f"{self.backend_url}/api/waveform/generate/"
+        return dict(self._request("POST", url, json_body={"track_id": track_id}))
+
+    def get_cover_image_presigned_url(self, filename: str = "cover.jpg") -> dict[str, Any]:
+        """Get a presigned upload URL for cover art (`GET /api/cover-image-presigned-url`)."""
+        url = f"{self.backend_url}/api/cover-image-presigned-url"
+        return dict(self._request("GET", url, params={"filename": filename}))
+
+    # -----------------------------------------------------------------------
+    # 12. Artist Profile, Social Notifications & Billing/Subscriptions
+    # -----------------------------------------------------------------------
+    def get_account_profile(self) -> dict[str, Any]:
+        """Fetch authenticated artist account profile (`GET /api/account/profile/`)."""
+        url = f"{self.backend_url}/api/account/profile/"
+        return dict(self._request("GET", url))
+
+    def update_account_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Update authenticated artist account profile (`PATCH /api/account/profile/`)."""
+        url = f"{self.backend_url}/api/account/profile/"
+        return dict(self._request("PATCH", url, json_body=payload))
+
+    def check_username_availability(self, username: str) -> dict[str, Any]:
+        """Check whether an artist handle is available (`GET /api/account/profile/username-availability/`)."""
+        url = f"{self.backend_url}/api/account/profile/username-availability/"
+        return dict(self._request("GET", url, params={"username": username.strip()}))
+
+    def get_public_artist_profile(self, username: str) -> dict[str, Any]:
+        """Fetch a public artist profile (`GET /api/public/profiles/{username}/`)."""
+        url = f"{self.backend_url}/api/public/profiles/{username.strip()}/"
+        return dict(self._request("GET", url))
+
+    def list_notifications(self, page: int = 1) -> dict[str, Any]:
+        """List social notifications (`GET /api/social/notifications/?page=`)."""
+        url = f"{self.backend_url}/api/social/notifications/"
+        return dict(self._request("GET", url, params={"page": page}))
+
+    def get_unread_notifications_count(self) -> dict[str, Any]:
+        """Get unread notification count (`GET /api/social/notifications/unread-count/`)."""
+        url = f"{self.backend_url}/api/social/notifications/unread-count/"
+        return dict(self._request("GET", url))
+
+    def mark_notifications_read(self, notification_ids: list[int | str] | None = None) -> dict[str, Any]:
+        """Mark notifications as read (`POST /api/social/notifications/read/`)."""
+        url = f"{self.backend_url}/api/social/notifications/read/"
+        body = {"ids": notification_ids} if notification_ids is not None else {}
+        return dict(self._request("POST", url, json_body=body))
+
+    def get_billing_info(self) -> dict[str, Any]:
+        """Fetch subscription, credit balance, and billing details (`GET /api/billing/info`)."""
+        url = f"{self.backend_url}/api/billing/info"
+        return dict(self._request("GET", url))
+
+    def create_checkout_session(self, product_id: str | int, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Create a Stripe checkout session (`POST /api/create-checkout-session`)."""
+        url = f"{self.backend_url}/api/create-checkout-session"
+        body: dict[str, Any] = {"product_id": product_id, **(extra or {})}
+        return dict(self._request("POST", url, json_body=body))
+
+    def create_customer_portal_session(self) -> dict[str, Any]:
+        """Create a Stripe billing portal session (`POST /api/create-customer-portal-session/`)."""
+        url = f"{self.backend_url}/api/create-customer-portal-session/"
+        return dict(self._request("POST", url, json_body={}))
+
+    def pause_subscription(self) -> dict[str, Any]:
+        """Pause active subscription (`POST /api/pause-subscription/`)."""
+        url = f"{self.backend_url}/api/pause-subscription/"
+        return dict(self._request("POST", url, json_body={}))
+
+    def resume_subscription(self) -> dict[str, Any]:
+        """Resume paused subscription (`POST /api/resume-subscription/`)."""
+        url = f"{self.backend_url}/api/resume-subscription/"
+        return dict(self._request("POST", url, json_body={}))
+
+    def get_referral_info(self) -> dict[str, Any]:
+        """Fetch artist referral code and reward telemetry (`GET /api/get-referral-info`)."""
+        url = f"{self.backend_url}/api/get-referral-info"
+        return dict(self._request("GET", url))
+
