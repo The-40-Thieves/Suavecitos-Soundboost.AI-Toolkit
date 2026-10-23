@@ -75,12 +75,12 @@ def cmd_audit(
         "4x True Peak (100ms Binary Search)",
         f"{res.true_peak_dbtp:.2f} dBTP @ {res.true_peak_time_sec:.2f} s",
     )
-    metrics.add_row("Crest Factor", f"{res.crest_factor_db:.2f} dB")
+    metrics.add_row("PSR (Peak-to-Short-term Loudness)", f"{res.psr_db:.2f} dB")
     metrics.add_row("Stereo Phase Correlation", f"{res.stereo_correlation:.3f} (M/S: {res.mid_side_ratio_db:.2f} dB)")
     metrics.add_row("Estimated High-Freq Bandwidth", f"{res.estimated_bandwidth_hz:.0f} Hz")
     metrics.add_row(
-        "DistroKid Release Ready",
-        "[bold green]YES[/bold green]" if res.distrokid_ready else "[bold yellow]NEEDS MASTERING[/bold yellow]",
+        "Release Ready (toolkit heuristic)",
+        "[bold green]YES[/bold green]" if res.release_ready_heuristic else "[bold yellow]NEEDS MASTERING[/bold yellow]",
     )
     console.print(metrics)
 
@@ -326,9 +326,30 @@ def cmd_mv_budget(
 @app.command("reaper-install")
 def cmd_reaper_install(
     reaper_dir: str | None = typer.Option(None, "--reaper-dir", help="Custom REAPER resource path"),
+    configure_bridge: bool = typer.Option(
+        False,
+        "--configure-bridge",
+        help="Also rewrite REAPER.ini to enable the HTTP (8080) + OSC (9000) bridge and Python ReaScript (opt-in).",
+    ),
+    enable_daemon: bool = typer.Option(
+        False,
+        "--enable-daemon",
+        help="Also install the __startup.lua hook so REAPER auto-launches the Live Bridge Daemon on boot (opt-in).",
+    ),
 ) -> None:
-    """Install the Suavecito SoundBoost 18-Band Mastering EQ JSFX plugin, Live Bridge Daemon, 12 .RfxChain presets & Stem Importer into REAPER."""
-    console.print_json(data=install_reaper_assets(reaper_dir))
+    """Install the Suavecito SoundBoost 18-Band Mastering EQ JSFX plugin, Live Bridge Daemon, 12 .RfxChain presets & Stem Importer into REAPER.
+
+    By default this only copies the assets. The live HTTP/OSC bridge and the auto-start
+    daemon are opt-in via --configure-bridge and --enable-daemon, since both modify
+    REAPER.ini / add a startup hook.
+    """
+    console.print_json(
+        data=install_reaper_assets(
+            reaper_dir,
+            configure_ini_bridge=configure_bridge,
+            enable_startup_daemon=enable_daemon,
+        )
+    )
 
 
 @app.command("reaper")
@@ -357,6 +378,12 @@ def cmd_reaper(
     artist: str | None = typer.Option(None, "--artist", help="Artist / Performer name"),
     album: str | None = typer.Option(None, "--album", help="Album title"),
     action_id: str | None = typer.Option(None, "--action-id", help="REAPER Action ID or command name"),
+    configure_bridge: bool = typer.Option(
+        False, "--configure-bridge", help="On install: also rewrite REAPER.ini for the HTTP/OSC bridge (opt-in)."
+    ),
+    enable_daemon: bool = typer.Option(
+        False, "--enable-daemon", help="On install: also install the __startup.lua auto-start daemon hook (opt-in)."
+    ),
 ) -> None:
     """Deep REAPER 7.82 integration & video pipeline controller (JSFX `gmem`, HTTP/OSC/IPC Live Bridge, `Shoots` Storyboard, `.MP4` Renderer & `.RPP` Generator)."""
     act = action.strip().lower().replace("_", "-")
@@ -364,7 +391,13 @@ def cmd_reaper(
         console.print_json(data=inspect_reaper_environment(reaper_dir))
         return
     if act == "install":
-        console.print_json(data=install_reaper_assets(reaper_dir))
+        console.print_json(
+            data=install_reaper_assets(
+                reaper_dir,
+                configure_ini_bridge=configure_bridge,
+                enable_startup_daemon=enable_daemon,
+            )
+        )
         return
     if act == "configure-bridge":
         console.print_json(data=configure_reaper_ini_bridge(reaper_dir))

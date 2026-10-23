@@ -1130,12 +1130,16 @@ def install_reaper_jsfx_and_scripts(
     bars_per_scene: int = 4,
     visual_style_prompt: str = "Cinematic neon nocturnal cyberpunk performance, anamorphic 35mm lens",
     plan_tier: str = "director",
+    configure_ini_bridge: bool = False,
+    enable_startup_daemon: bool = False,
 ) -> dict[str, Any]:
     """Deep REAPER 7.82 Integration & Video Pipeline Suite for Suavecito's SoundBoost.AI Toolkit:
     - `install` (default): Install `SoundBoost_18Band_Mastering_EQ_Monitor.jsfx` (`options:gmem=SuavecitoSoundBoost`),
-      `Suavecito_SoundBoost_Stem_Import.lua`, `Suavecito_Live_Bridge_Daemon.lua` (`__startup.lua` hook),
-      `Suavecito_SoundBoost_9x16_Canvas_Visualizer.txt`, 12 Genre `.RfxChain` files, and configure `REAPER.ini`
-      for HTTP Control Surface (port 8080), UDP OSC (port 9000), and Python 3.13 ReaScript (`python313.dll`).
+      `Suavecito_SoundBoost_Stem_Import.lua`, `Suavecito_Live_Bridge_Daemon.lua`,
+      `Suavecito_SoundBoost_9x16_Canvas_Visualizer.txt`, and 12 Genre `.RfxChain` files. The live bridge is
+      opt-in: set `configure_ini_bridge=True` to rewrite `REAPER.ini` for the HTTP Control Surface (port 8080),
+      UDP OSC (port 9000), and Python 3.13 ReaScript, and `enable_startup_daemon=True` to add the `__startup.lua`
+      auto-start hook. Both default to False so a bare install only copies assets.
     - `inspect`: Forensically inspect running `reaper.exe` PID, `REAPER.ini`, installed VST3/CLAP/JSFX plugins, and live `gmem` telemetry.
     - `live_status`: Query live REAPER transport, beat position, track list, markers, and `gmem` telemetry via HTTP + IPC bridge.
     - `push_eq`: Push a live 18-band Mastering EQ curve (explicit `eq_18band_db`, `preset`, or natural-language `prompt`),
@@ -1151,7 +1155,11 @@ def install_reaper_jsfx_and_scripts(
     """
     act = action.strip().lower().replace("-", "_")
     if act == "install":
-        return install_reaper_assets(reaper_resource_dir)
+        return install_reaper_assets(
+            reaper_resource_dir,
+            configure_ini_bridge=configure_ini_bridge,
+            enable_startup_daemon=enable_startup_daemon,
+        )
     if act == "inspect":
         return inspect_reaper_environment(reaper_resource_dir)
     if act == "configure_bridge":
@@ -1906,7 +1914,7 @@ def prompt_distrokid_release_workflow(track_path: str, genre: str = "pop", isrc:
         "2. If cymbal harshness or vocal/instrument imbalance is detected, use `soundboost_studio_stems_and_drums` "
         "(`hifi_6stem` + `start_drums` for Kick/Snare/Toms/Hi-Hat/Cymbals) or import into REAPER via `Suavecito_SoundBoost_Stem_Import.lua`.\n"
         f"3. Render the 24-bit / 48 kHz master using `render_local_18band_master` (preset=`{genre}`, target_lufs=-14.0, true_peak_ceiling_dbtp=-1.0, bit_depth=24, apply_tpdf_dither=True).\n"
-        "4. Re-audit the mastered file with `audit_audio_loudness_and_release_readiness` to confirm `distrokid_ready == True`.\n"
+        "4. Re-audit the mastered file with `audit_audio_loudness_and_release_readiness` to confirm `release_ready_heuristic == True`.\n"
         f"5. Embed release metadata and ISRC (`{isrc or 'CC-XXX-YY-NNNNN'}`) using `write_release_metadata_tags`."
     )
 
