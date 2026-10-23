@@ -1,0 +1,41 @@
+// Suavecito's SoundBoost.AI 9:16 Spotify Canvas & Shoots (h3-max) Audio-Reactive Video Processor
+// Attach to a Video Processor FX on any REAPER Video Track; syncs with SoundBoost_18Band_Mastering_EQ_Monitor.jsfx
+//@gmem=SuavecitoSoundBoost
+//@param1:react_gain "Audio Reactivity" 1.0 0.1 3.0 1.0 0.05
+//@param2:show_hud "Show 18-Band EQ HUD (1=Yes,0=No)" 1 0 1 1 1
+//@param3:aspect_9x16 "Force 9:16 Canvas Crop (1=Yes,0=No)" 0 0 1 0 1
+
+input = 0;
+project_wh_valid === 0 ? input_info(input, project_w, project_h);
+gfx_blit(input, 1);
+
+peak_db = gmem[3];
+gr_db = gmem[4];
+corr = gmem[5];
+width_pct = gmem[6];
+
+show_hud >= 0.5 ? (
+  bar_area_w = project_w * 0.84;
+  bar_area_x = project_w * 0.08;
+  bar_base_y = project_h * 0.88;
+  bar_max_h  = project_h * 0.18;
+  slot_w = bar_area_w / 18;
+
+  // Semi-transparent backdrop panel
+  gfx_set(0.05, 0.07, 0.12, 0.72);
+  gfx_fillrect(bar_area_x - 12, bar_base_y - bar_max_h - 24, bar_area_w + 24, bar_max_h + 48);
+
+  i = 0;
+  loop(18,
+    gain_db = gmem[10 + i] * react_gain;
+    norm = min(max((gain_db + 12.0) / 24.0, 0.05), 1.0);
+    h = norm * bar_max_h;
+    bx = bar_area_x + i * slot_w + 2;
+    by = bar_base_y - h;
+    // Cyan-to-magenta gradient across the 18 bands
+    t = i / 17.0;
+    gfx_set(0.15 + 0.80 * t, 0.78 - 0.42 * t, 0.96 - 0.18 * t, 0.92);
+    gfx_fillrect(bx, by, max(slot_w - 4, 2), h);
+    i += 1;
+  );
+);

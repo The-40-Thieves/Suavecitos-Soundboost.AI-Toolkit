@@ -77,7 +77,13 @@ from soundboost_toolkit.oauth import (
     run_loopback_oauth_handoff,
     save_credentials_to_vault,
 )
-from soundboost_toolkit.reaper_integration import install_reaper_assets
+from soundboost_toolkit.reaper_integration import (
+    ReaperLiveBridge,
+    configure_reaper_ini_bridge,
+    generate_soundboost_rpp_project,
+     inspect_reaper_environment,
+    install_reaper_assets,
+)
 from soundboost_toolkit.tagging import read_audio_tags, write_audio_tags
 
 mcp = FastMCP(
@@ -1149,18 +1155,129 @@ async def soundboost_oauth_and_vault(
 
 
 @mcp.tool(
-    tags={"reaper", "daw", "jsfx"},
+    tags={"reaper", "daw", "jsfx", "osc", "rpp"},
     annotations=ToolAnnotations(
-        title="Install REAPER 18-Band Mastering EQ JSFX & Stem Importer ReaScript",
+        title="REAPER 7.82 Deep Integration Suite (JSFX gmem, Live OSC/HTTP/IPC Bridge & .RPP Session Generator)",
         read_only_hint=False,
         destructive_hint=False,
         idempotent_hint=True,
         open_world_hint=False,
     ),
 )
-def install_reaper_jsfx_and_scripts(reaper_resource_dir: str | None = None) -> dict[str, Any]:
-    """Install Suavecito's SoundBoost 18-Band Mastering EQ JSFX plugin and Multitrack Stem Importer ReaScript into REAPER."""
-    return install_reaper_assets(reaper_resource_dir)
+def install_reaper_jsfx_and_scripts(
+    reaper_resource_dir: str | None = None,
+    action: str = "install",
+    preset: str = "pop",
+    prompt: str | None = None,
+    eq_18band_db: list[float] | None = None,
+    stereo_width_pct: float = 100.0,
+    makeup_drive_db: float = 0.0,
+    ceiling_dbtp: float = -1.0,
+    osc_address: str | None = None,
+    osc_value: float | str | None = None,
+    output_rpp_path: str | None = None,
+    stems_folder: str | None = None,
+    stem_files: list[str] | None = None,
+    audit_audio_path: str | None = None,
+    bpm: float = 120.0,
+    isrc: str | None = None,
+    title: str | None = None,
+    artist: str | None = None,
+    album: str | None = None,
+    chords: list[dict[str, Any]] | None = None,
+    lyrics: list[dict[str, Any]] | None = None,
+    reaper_action_id: str | None = None,
+) -> dict[str, Any]:
+    """Deep REAPER 7.82 Integration Suite for Suavecito's SoundBoost.AI Toolkit:
+    - `install` (default): Install `SoundBoost_18Band_Mastering_EQ_Monitor.jsfx` (`options:gmem=SuavecitoSoundBoost`),
+      `Suavecito_SoundBoost_Stem_Import.lua`, `Suavecito_Live_Bridge_Daemon.lua` (`__startup.lua` hook),
+      `Suavecito_SoundBoost_9x16_Canvas_Visualizer.txt`, 12 Genre `.RfxChain` files, and configure `REAPER.ini`
+      for HTTP Control Surface (port 8080), UDP OSC (port 9000), and Python 3.13 ReaScript (`python313.dll`).
+    - `inspect`: Forensically inspect running `reaper.exe` PID, `REAPER.ini`, installed VST3/CLAP/JSFX plugins, and live `gmem` telemetry.
+    - `live_status`: Query live REAPER transport, beat position, track list, markers, and `gmem` telemetry via HTTP + IPC bridge.
+    - `push_eq`: Push a live 18-band Mastering EQ curve (explicit `eq_18band_db`, `preset`, or natural-language `prompt`),
+      `stereo_width_pct`, `makeup_drive_db`, and `ceiling_dbtp` directly to REAPER's Master EQ via `gmem=SuavecitoSoundBoost`.
+    - `send_osc`: Send a binary UDP Open Sound Control packet (`osc_address`, `osc_value`) to REAPER (`127.0.0.1:9000`).
+    - `import_stems`: Command live REAPER to import `stems_folder` into hierarchical folder buses (`DRUM KIT BUS`, `VOCAL BUS`, `INSTRUMENT BUS`) with 5-Piece Drum MIDI triggers.
+    - `inject_isrc`: Inject `<RENDER_METADATA>` (`ID3:TSRC|<ISRC>;VORBIS:ISRC|<ISRC>`) and DDP markers into the active REAPER project.
+    - `generate_rpp`: Generate a complete REAPER 7.82 `.RPP` multitrack session (`output_rpp_path`) with folder buses, track icons, 5-Piece Drum MIDI triggers, 100ms True-Peak clipping markers, Studio Chords/Lyrics regions, DDP/ISRC metadata, and a 9:16 Video Track.
+    - `run_action`: Trigger any native REAPER Action ID or named command (`reaper_action_id`).
+    """
+    act = action.strip().lower().replace("-", "_")
+    if act == "install":
+        return install_reaper_assets(reaper_resource_dir)
+    if act == "inspect":
+        return inspect_reaper_environment(reaper_resource_dir)
+    if act == "configure_bridge":
+        return configure_reaper_ini_bridge(reaper_resource_dir)
+
+    bridge = ReaperLiveBridge(reaper_resource_dir=reaper_resource_dir)
+    if act == "live_status":
+        http_state = bridge.query_http_control()
+        ipc_state = bridge.dispatch_ipc_command("telemetry", wait_for_ack_sec=0.35)
+        return {"http_control_surface": http_state, "ipc_daemon": ipc_state}
+    if act == "push_eq":
+        return bridge.push_18band_eq_to_reaper(
+            eq_18band_db=eq_18band_db,
+            stereo_width_pct=stereo_width_pct,
+            makeup_drive_db=makeup_drive_db,
+            ceiling_dbtp=ceiling_dbtp,
+            preset=preset,
+            prompt=prompt,
+        )
+    if act == "send_osc":
+        if not osc_address:
+            raise ValueError("osc_address is required for action='send_osc'")
+        args = [osc_value] if osc_value is not None else []
+        return bridge.send_osc(osc_address, *args)
+    if act == "import_stems":
+        if not stems_folder:
+            raise ValueError("stems_folder is required for action='import_stems'")
+        return bridge.dispatch_ipc_command(
+            "import_stems",
+            {"stems_folder": str(Path(stems_folder).expanduser().resolve()), "add_drum_triggers": 1},
+        )
+    if act == "inject_isrc":
+        tags: list[str] = []
+        if isrc:
+            tags.extend([f"ID3:TSRC|{isrc}", f"VORBIS:ISRC|{isrc}", f"IXML:ISRC|{isrc}"])
+        if title:
+            tags.append(f"ID3:TIT2|{title}")
+        if artist:
+            tags.append(f"ID3:TPE1|{artist}")
+        if album:
+            tags.append(f"ID3:TALB|{album}")
+        meta_str = ";".join(tags)
+        return bridge.dispatch_ipc_command("set_render_metadata", {"render_metadata": meta_str})
+    if act == "run_action":
+        if not reaper_action_id:
+            raise ValueError("reaper_action_id is required for action='run_action'")
+        return bridge.dispatch_ipc_command("run_action", {"action_id": str(reaper_action_id)})
+    if act == "generate_rpp":
+        if not output_rpp_path:
+            raise ValueError("output_rpp_path is required for action='generate_rpp'")
+        return generate_soundboost_rpp_project(
+            output_rpp_path=output_rpp_path,
+            stem_files=stem_files,
+            stems_folder=stems_folder,
+            bpm=bpm,
+            preset=preset,
+            prompt=prompt,
+            eq_18band_db=eq_18band_db,
+            stereo_width_pct=stereo_width_pct,
+            makeup_drive_db=makeup_drive_db,
+            ceiling_dbtp=ceiling_dbtp,
+            isrc=isrc,
+            title=title,
+            artist=artist,
+            album=album,
+            chords=chords,
+            lyrics=lyrics,
+            audit_audio_path=audit_audio_path,
+        )
+    raise ValueError(
+        f"Unsupported REAPER action '{action}'. Valid: install, inspect, configure_bridge, live_status, push_eq, send_osc, import_stems, inject_isrc, generate_rpp, run_action"
+    )
 
 
 @mcp.tool(

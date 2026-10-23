@@ -38,7 +38,13 @@ from soundboost_toolkit.oauth import (
     run_loopback_oauth_handoff,
     save_credentials_to_vault,
 )
-from soundboost_toolkit.reaper_integration import install_reaper_assets
+from soundboost_toolkit.reaper_integration import (
+    ReaperLiveBridge,
+    configure_reaper_ini_bridge,
+    generate_soundboost_rpp_project,
+    inspect_reaper_environment,
+    install_reaper_assets,
+)
 from soundboost_toolkit.tagging import read_audio_tags, write_audio_tags
 
 app = typer.Typer(
@@ -348,8 +354,117 @@ def cmd_mv_budget(
 def cmd_reaper_install(
     reaper_dir: str | None = typer.Option(None, "--reaper-dir", help="Custom REAPER resource path"),
 ) -> None:
-    """Install the Suavecito SoundBoost 18-Band Mastering EQ JSFX plugin and Stem Importer ReaScript into REAPER."""
+    """Install the Suavecito SoundBoost 18-Band Mastering EQ JSFX plugin, Live Bridge Daemon, 12 .RfxChain presets & Stem Importer into REAPER."""
     console.print_json(data=install_reaper_assets(reaper_dir))
+
+
+@app.command("reaper")
+def cmd_reaper(
+    action: str = typer.Argument(
+        "inspect",
+        help="inspect | install | status | push-eq | osc | import-stems | generate-rpp | inject-isrc | action",
+    ),
+    reaper_dir: str | None = typer.Option(None, "--reaper-dir", help="Custom REAPER resource path"),
+    preset: str = typer.Option("pop", "--preset", "-p", help="SoundBoost Mastering genre preset"),
+    prompt: str | None = typer.Option(None, "--prompt", help="Natural-language 18-band EQ prompt"),
+    width: float = typer.Option(100.0, "--width", help="Mid/Side Stereo Width % (0..200)"),
+    drive: float = typer.Option(0.0, "--drive", help="Limiter Makeup Drive dB"),
+    ceiling: float = typer.Option(-1.0, "--ceiling", help="Brickwall Ceiling dBTP"),
+    osc_address: str | None = typer.Option(None, "--osc-addr", help="OSC address (e.g. /tempo/raw)"),
+    osc_val: float | None = typer.Option(None, "--osc-val", help="OSC numeric argument"),
+    stems_folder: str | None = typer.Option(None, "--stems-dir", help="Folder of separated stems"),
+    rpp_out: str | None = typer.Option(None, "--rpp", "-o", help="Output .RPP project file path"),
+    audit_file: str | None = typer.Option(None, "--audit-file", help="Audio file to audit for 100ms True-Peak clipping markers"),
+    bpm: float = typer.Option(120.0, "--bpm", help="Project tempo in BPM"),
+    isrc: str | None = typer.Option(None, "--isrc", help="ISRC code for <RENDER_METADATA> and DDP INDEX1"),
+    title: str | None = typer.Option(None, "--title", help="Track title"),
+    artist: str | None = typer.Option(None, "--artist", help="Artist / Performer name"),
+    album: str | None = typer.Option(None, "--album", help="Album title"),
+    action_id: str | None = typer.Option(None, "--action-id", help="REAPER Action ID or command name"),
+) -> None:
+    """Deep REAPER 7.82 integration controller (JSFX `gmem`, HTTP/OSC/IPC Live Bridge & `.RPP` Multitrack Generator)."""
+    act = action.strip().lower().replace("_", "-")
+    if act == "inspect":
+        console.print_json(data=inspect_reaper_environment(reaper_dir))
+        return
+    if act == "install":
+        console.print_json(data=install_reaper_assets(reaper_dir))
+        return
+    if act == "configure-bridge":
+        console.print_json(data=configure_reaper_ini_bridge(reaper_dir))
+        return
+
+    bridge = ReaperLiveBridge(reaper_resource_dir=reaper_dir)
+    if act == "status":
+        console.print_json(
+            data={
+                "http_control_surface": bridge.query_http_control(),
+                "ipc_daemon": bridge.dispatch_ipc_command("telemetry", wait_for_ack_sec=0.35),
+            }
+        )
+    elif act == "push-eq":
+        console.print_json(
+            data=bridge.push_18band_eq_to_reaper(
+                stereo_width_pct=width,
+                makeup_drive_db=drive,
+                ceiling_dbtp=ceiling,
+                preset=preset,
+                prompt=prompt,
+            )
+        )
+    elif act == "osc":
+        if not osc_address:
+            raise typer.BadParameter("--osc-addr is required for osc")
+        args = [osc_val] if osc_val is not None else []
+        console.print_json(data=bridge.send_osc(osc_address, *args))
+    elif act == "import-stems":
+        if not stems_folder:
+            raise typer.BadParameter("--stems-dir is required for import-stems")
+        console.print_json(
+            data=bridge.dispatch_ipc_command(
+                "import_stems",
+                {"stems_folder": stems_folder, "add_drum_triggers": 1},
+            )
+        )
+    elif act == "inject-isrc":
+        tags: list[str] = []
+        if isrc:
+            tags.extend([f"ID3:TSRC|{isrc}", f"VORBIS:ISRC|{isrc}", f"IXML:ISRC|{isrc}"])
+        if title:
+            tags.append(f"ID3:TIT2|{title}")
+        if artist:
+            tags.append(f"ID3:TPE1|{artist}")
+        if album:
+            tags.append(f"ID3:TALB|{album}")
+        console.print_json(
+            data=bridge.dispatch_ipc_command("set_render_metadata", {"render_metadata": ";".join(tags)})
+        )
+    elif act == "generate-rpp":
+        if not rpp_out:
+            raise typer.BadParameter("--rpp is required for generate-rpp")
+        console.print_json(
+            data=generate_soundboost_rpp_project(
+                output_rpp_path=rpp_out,
+                stems_folder=stems_folder,
+                bpm=bpm,
+                preset=preset,
+                prompt=prompt,
+                stereo_width_pct=width,
+                makeup_drive_db=drive,
+                ceiling_dbtp=ceiling,
+                isrc=isrc,
+                title=title,
+                artist=artist,
+                album=album,
+                audit_audio_path=audit_file,
+            )
+        )
+    elif act == "action":
+        if not action_id:
+            raise typer.BadParameter("--action-id is required for action")
+        console.print_json(data=bridge.dispatch_ipc_command("run_action", {"action_id": action_id}))
+    else:
+        raise typer.BadParameter(f"Unknown reaper action '{action}'")
 
 
 @app.command("specs")

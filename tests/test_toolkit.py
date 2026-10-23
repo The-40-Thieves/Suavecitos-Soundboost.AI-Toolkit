@@ -51,6 +51,14 @@ from soundboost_toolkit.oauth import (
     generate_google_pkce_challenge,
     get_vault_status,
 )
+from soundboost_toolkit.reaper_integration import (
+    ReaperLiveBridge,
+    build_osc_packet,
+    build_rfxchain_content,
+    generate_soundboost_rpp_project,
+    inspect_reaper_environment,
+    install_reaper_assets,
+)
 from soundboost_toolkit.tagging import (
     normalize_and_validate_isrc,
     read_audio_tags,
@@ -481,6 +489,78 @@ class SoundBoostToolkitTests(unittest.TestCase):
             client_id="test-client-id",
         )
         self.assertIsNotNone(remote_prov)
+
+    def test_reaper_deep_integration_osc_rfxchain_and_rpp_generator(self) -> None:
+        # 1. Binary OSC packet encoding
+        pkt = build_osc_packet("/tempo/raw", 128.0)
+        self.assertTrue(pkt.startswith(b"/tempo/raw\x00\x00,f\x00\x00"))
+        self.assertEqual(len(pkt) % 4, 0)
+
+        # 2. .RfxChain generator
+        chain_text = build_rfxchain_content("pop")
+        self.assertIn("SoundBoost_18Band_Mastering_EQ_Monitor.jsfx", chain_text)
+        self.assertIn("analysis/loudness_meter", chain_text)
+
+        # 3. Full sandboxed REAPER asset installer, INI bridge & .RPP generator
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            fake_ini = tmp_path / "REAPER.ini"
+            fake_ini.write_text("[reaper]\nmixeruiflags=11\n[verchk]\nlastt=1\n", encoding="utf-8")
+
+            inst = install_reaper_assets(tmp_path)
+            self.assertEqual(inst["status"], "installed")
+            self.assertEqual(inst["installed_fxchains_count"], 12)
+            self.assertTrue((tmp_path / "Scripts" / "__startup.lua").exists())
+            self.assertTrue((tmp_path / "Scripts" / "Suavecito" / "Suavecito_Live_Bridge_Daemon.lua").exists())
+
+            env_info = inspect_reaper_environment(tmp_path)
+            self.assertTrue(env_info["ini_bridge_config"]["reascript_enabled"])
+            self.assertTrue(env_info["ini_bridge_config"]["http_csurf_configured"])
+            self.assertTrue(env_info["ini_bridge_config"]["osc_csurf_configured"])
+            self.assertTrue(env_info["suavecito_assets"]["jsfx_gmem_enabled"])
+            self.assertTrue(env_info["suavecito_assets"]["startup_hook_installed"])
+
+            # Create fake stem WAVs (Kick, Snare, Vocals, Bass) and generate .RPP session
+            stems_dir = tmp_path / "stems"
+            stems_dir.mkdir(parents=True, exist_ok=True)
+            sr = 48000
+            t = np.linspace(0.0, 0.25, sr // 4, endpoint=False)
+            tone = (0.98 * np.sin(2.0 * np.pi * 440.0 * t)).astype(np.float32)
+            stereo = np.column_stack([tone, tone])
+            for name in ("01_Kick.wav", "02_Snare.wav", "03_Vocals.wav", "04_Bass.wav"):
+                sf.write(str(stems_dir / name), stereo, sr, subtype="PCM_24")
+
+            rpp_out = tmp_path / "Session.RPP"
+            rpp_res = generate_soundboost_rpp_project(
+                output_rpp_path=rpp_out,
+                stems_folder=stems_dir,
+                bpm=128.0,
+                preset="hip_hop",
+                prompt="warm sub bass, crisp vocal presence, wide stereo",
+                isrc="US-S1Z-26-00001",
+                title="Midnight Hustle",
+                artist="Suavecito",
+                album="40 Thieves Vol. 1",
+                chords=[{"chord": "Cm", "start_sec": 0.0, "end_sec": 2.0}],
+                lyrics=[{"text": "Step into the light", "start_sec": 0.5}],
+                audit_audio_path=stems_dir / "01_Kick.wav",
+            )
+            self.assertTrue(rpp_out.exists())
+            self.assertGreaterEqual(rpp_res["tracks_created"], 7)
+            rpp_text = rpp_out.read_text(encoding="utf-8")
+            self.assertIn("DRUM KIT BUS", rpp_text)
+            self.assertIn("VOCAL BUS", rpp_text)
+            self.assertIn("INSTRUMENT BUS", rpp_text)
+            self.assertIn('JS "midi/drumtrigger"', rpp_text)
+            self.assertIn("TAG ID3:TSRC US-S1Z-26-00001", rpp_text)
+            self.assertIn("CHORD: Cm", rpp_text)
+            self.assertIn("LYRIC: Step into the light", rpp_text)
+
+            # Verify LiveBridge IPC inbox dispatch
+            bridge = ReaperLiveBridge(reaper_resource_dir=tmp_path)
+            eq_push = bridge.push_18band_eq_to_reaper(prompt="warm low end and airy top")
+            self.assertEqual(len(eq_push["eq_18band_db"]), 18)
+            self.assertTrue(bridge.inbox_path.exists())
 
 
 if __name__ == "__main__":

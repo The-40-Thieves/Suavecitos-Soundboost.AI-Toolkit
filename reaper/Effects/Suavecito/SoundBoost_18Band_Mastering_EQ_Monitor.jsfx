@@ -1,6 +1,8 @@
-desc:Suavecito's SoundBoost.AI 18-Band Mastering EQ, M/S Width & Ceiling Limiter
-//tags: equalizer mastering limiter stereo mid-side suavecito soundboost
+desc:Suavecito's SoundBoost.AI 18-Band Mastering EQ, M/S Width & Ceiling Limiter (gmem Live Sync)
+//tags: equalizer mastering limiter stereo mid-side suavecito soundboost gmem
 //author: Suavecito (The 40 Thieves)
+
+options:gmem=SuavecitoSoundBoost
 
 slider1:0<-6,6,0.1>Band 1: 20 Hz (Sub) [dB]
 slider2:0<-6,6,0.1>Band 2: 30 Hz (Sub) [dB]
@@ -38,6 +40,11 @@ states_l = 200; // 4 state vars per band -> 72 slots
 states_r = 300;
 peak_hold_db = -90;
 gr_meter_db = 0;
+last_gmem_seq = -1;
+corr_ll = 0.000001;
+corr_rr = 0.000001;
+corr_lr = 0.0;
+stereo_corr = 1.0;
 
 function update_biquad(idx, freq, gain_db) local(A, w0, alpha, cosw0, b0, b1, b2, a0, a1, a2, base) (
   base = coeffs + idx * 5;
@@ -62,22 +69,55 @@ function update_biquad(idx, freq, gain_db) local(A, w0, alpha, cosw0, b0, b1, b2
   );
 );
 
-@slider
-gains[0] = slider1;  gains[1] = slider2;  gains[2] = slider3;  gains[3] = slider4;
-gains[4] = slider5;  gains[5] = slider6;  gains[6] = slider7;  gains[7] = slider8;
-gains[8] = slider9;  gains[9] = slider10; gains[10] = slider11; gains[11] = slider12;
-gains[12] = slider13; gains[13] = slider14; gains[14] = slider15; gains[15] = slider16;
-gains[16] = slider17; gains[17] = slider18;
+function sync_all_bands() local(i) (
+  gains[0] = slider1;  gains[1] = slider2;  gains[2] = slider3;  gains[3] = slider4;
+  gains[4] = slider5;  gains[5] = slider6;  gains[6] = slider7;  gains[7] = slider8;
+  gains[8] = slider9;  gains[9] = slider10; gains[10] = slider11; gains[11] = slider12;
+  gains[12] = slider13; gains[13] = slider14; gains[14] = slider15; gains[15] = slider16;
+  gains[16] = slider17; gains[17] = slider18;
 
-i = 0;
-loop(18,
-  update_biquad(i, freqs[i], gains[i]);
-  i += 1;
+  i = 0;
+  loop(18,
+    update_biquad(i, freqs[i], gains[i]);
+    gmem[10 + i] = gains[i];
+    i += 1;
+  );
+  width_factor = slider19 / 100.0;
+  drive_lin = 10 ^ (slider20 / 20.0);
+  ceiling_lin = 10 ^ (slider21 / 20.0);
 );
 
-width_factor = slider19 / 100.0;
-drive_lin = 10 ^ (slider20 / 20.0);
-ceiling_lin = 10 ^ (slider21 / 20.0);
+@slider
+sync_all_bands();
+
+@block
+// Live gmem command bridge from Suavecito Lua Daemon / MCP Server:
+// gmem[127] = sequence counter (> 0 and != last_gmem_seq triggers instant parameter update)
+// gmem[100..117] = 18-band EQ gains in dB
+// gmem[118] = Mid/Side Stereo Width (%)
+// gmem[119] = Makeup / Drive Gain (dB)
+// gmem[120] = Brickwall Ceiling (dBTP)
+gmem[127] > 0 && gmem[127] != last_gmem_seq ? (
+  last_gmem_seq = gmem[127];
+  slider1 = gmem[100]; slider2 = gmem[101]; slider3 = gmem[102]; slider4 = gmem[103];
+  slider5 = gmem[104]; slider6 = gmem[105]; slider7 = gmem[106]; slider8 = gmem[107];
+  slider9 = gmem[108]; slider10 = gmem[109]; slider11 = gmem[110]; slider12 = gmem[111];
+  slider13 = gmem[112]; slider14 = gmem[113]; slider15 = gmem[114]; slider16 = gmem[115];
+  slider17 = gmem[116]; slider18 = gmem[117];
+  gmem[118] > 0 ? slider19 = gmem[118];
+  slider20 = gmem[119];
+  gmem[120] < 0 ? slider21 = gmem[120];
+  sliderchange(-1);
+  sync_all_bands();
+);
+
+// Publish real-time telemetry to gmem[0..5] for Lua Daemon & Video Processor
+gmem[0] = play_position;
+gmem[1] = peak_hold_db;
+gmem[2] = gr_meter_db;
+gmem[3] = stereo_corr;
+gmem[4] = slider19;
+gmem[5] = slider21;
 
 @sample
 xl = spl0;
@@ -105,6 +145,12 @@ mid = 0.5 * (xl + xr);
 side = 0.5 * (xl - xr) * width_factor;
 xl = (mid + side) * drive_lin;
 xr = (mid - side) * drive_lin;
+
+// Running Stereo Phase Correlation
+corr_ll = corr_ll * 0.9995 + xl * xl * 0.0005;
+corr_rr = corr_rr * 0.9995 + xr * xr * 0.0005;
+corr_lr = corr_lr * 0.9995 + xl * xr * 0.0005;
+stereo_corr = corr_lr / sqrt(max(0.0000000001, corr_ll * corr_rr));
 
 // Brickwall Ceiling Limiter
 abs_max = max(abs(xl), abs(xr));
@@ -158,4 +204,5 @@ gfx_drawstr("%  |  Ceiling: ");
 gfx_drawnumber(slider21, 1);
 gfx_drawstr(" dBTP  |  Peak: ");
 gfx_drawnumber(peak_hold_db, 1);
-gfx_drawstr(" dBFS");
+gfx_drawstr(" dBFS  |  Corr: ");
+gfx_drawnumber(stereo_corr, 2);
