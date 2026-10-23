@@ -39,6 +39,27 @@ from soundboost_toolkit.oauth import load_token_from_vault, save_credentials_to_
 
 DEFAULT_TIMEOUT_SEC = 60.0
 
+# Public/free endpoints that do not require an authenticated SoundBoost account/subscription
+_PUBLIC_FREE_PATH_PREFIXES: tuple[str, ...] = (
+    "/api/login/",
+    "/api/google-login/",
+    "/api/apple/login/",
+    "/api/user/register",
+    "/api/user/verify-email/",
+    "/api/products/",
+    "/api/health/",
+    "/api/decrypt-param-static",
+    "/api/v1/formats",
+    "/api/v1/convert",
+    "/api/v1/status/",
+    "/api/audio/public/",
+    "/api/public/",
+)
+
+
+class SoundBoostPayGateError(PermissionError):
+    """Raised when a paid Mastering, Studio, or Shoots endpoint is called without an authenticated SoundBoost session."""
+
 
 class SoundBoostClient:
     """Production client for SoundBoost.ai with automatic `ui-token` signing & R2 failover."""
@@ -109,6 +130,26 @@ class SoundBoostClient:
             return path
         return f"{path}/"
 
+    @staticmethod
+    def _is_public_free_url(url: str) -> bool:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        path = parsed.path or "/"
+        # Note: /api/v1/stem-export on converta is a Studio paid/authenticated stem-loop export,
+        # whereas /api/v1/formats, /api/v1/convert, /api/v1/status/ are free Converta endpoints.
+        return any(path.startswith(prefix) for prefix in _PUBLIC_FREE_PATH_PREFIXES)
+
+    def require_authenticated(self, endpoint_url: str = "") -> str:
+        """Enforce SoundBoost's authentication & subscription pay gate for paid Mastering, Studio, and Shoots endpoints."""
+        if self.access_token and self.access_token.strip():
+            return self.access_token.strip()
+        raise SoundBoostPayGateError(
+            f"SoundBoost authentication required for paid/studio endpoint '{endpoint_url or 'api.soundboost.ai'}'. "
+            "Sign in first via `soundboost auth browser-login`, `soundboost auth google-exchange --token <token>`, "
+            "or `soundboost_oauth_and_vault(action='browser_handoff')` so requests authenticate against your SoundBoost account and subscription."
+        )
+
     def _request(
         self,
         method: str,
@@ -120,7 +161,11 @@ class SoundBoostClient:
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
         timeout_sec: float | None = None,
+        requires_auth: bool | None = None,
     ) -> Any:
+        must_auth = (not self._is_public_free_url(url)) if requires_auth is None else requires_auth
+        if must_auth:
+            self.require_authenticated(url)
         include_json_ct = files is None and data is None
         headers = self._build_headers(
             extra_headers=extra_headers,

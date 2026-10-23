@@ -26,11 +26,7 @@ from soundboost_toolkit.dsp import (
     classify_pitch_shift_zone,
     get_chord_voicing_diagram,
     inspect_mp3_gapless_headers,
-    master_album_folder,
     quantize_loop_to_bar_beat_sixteenth,
-    render_18band_master,
-    render_local_pitch_and_time_stretch,
-    translate_prompt_to_18band_eq,
     transpose_chord_symbol,
 )
 from soundboost_toolkit.mcp_server import list_soundboost_platform_capabilities
@@ -110,34 +106,57 @@ def cmd_audit(
     console.print(Panel(rec_text, title="Mix Doctor Recommendations", border_style="blue"))
 
 
-@app.command("master-local")
-def cmd_master_local(
-    input_path: str = typer.Argument(..., help="Input audio file path"),
-    output_path: str = typer.Argument(..., help="Output mastered WAV file path"),
+@app.command("master")
+def cmd_master(
+    action: str = typer.Argument(
+        "status",
+        help="upload | master | status | mix-doctor | enhance | stats | stem-prep",
+    ),
+    file_path: str | None = typer.Option(None, "--file", "-f", help="Audio file path to upload"),
+    track_id: str | None = typer.Option(None, "--track-id", "-id", help="Uploaded SoundBoost track ID"),
+    mode: str = typer.Option("auto", "--mode", "-m", help="Mastering mode: prompt | preset | auto | reference | chat | manual | mix_doctor | enhance"),
     preset: str = typer.Option("pop", "--preset", "-p", help=f"Genre preset ({', '.join(MASTERING_GENRE_PRESETS)})"),
+    prompt: str | None = typer.Option(None, "--prompt", help="Natural-language mastering prompt"),
     eq_csv: str | None = typer.Option(None, "--eq", help="18 comma-separated dB values (-6.0 to +6.0) for 20Hz..15kHz"),
-    width: float = typer.Option(100.0, "--width", "-w", help="Mid/Side stereo width % (0-200)"),
-    target_lufs: float = typer.Option(-14.0, "--lufs", "-l", help="Target Integrated LUFS"),
-    ceiling: float = typer.Option(-1.0, "--ceiling", "-c", help="True-Peak brickwall ceiling in dBTP"),
-    bit_depth: int = typer.Option(24, "--bits", "-b", help="Output WAV bit depth (16, 24, or 32)"),
-    dither: bool = typer.Option(True, "--dither/--no-dither", help="Apply TPDF dithering"),
+    width: float | None = typer.Option(None, "--width", "-w", help="Mid/Side stereo width % (0-200)"),
+    target_lufs: float | None = typer.Option(None, "--lufs", "-l", help="Target Integrated LUFS"),
 ) -> None:
-    """Render a local studio master using SoundBoost's 18-Band Graphic EQ, M/S Width, LUFS Gain & True-Peak Limiter."""
-    eq_list: list[float] | None = None
-    if eq_csv:
-        eq_list = [float(x.strip()) for x in eq_csv.split(",") if x.strip()]
-    result = render_18band_master(
-        input_path=input_path,
-        output_path=output_path,
-        eq_gains_db=eq_list,
-        preset=None if eq_list else preset,
-        stereo_width_pct=width,
-        target_lufs=target_lufs,
-        true_peak_ceiling_dbtp=ceiling,
-        bit_depth=bit_depth,
-        apply_tpdf_dither=dither,
-    )
-    console.print_json(data=result)
+    """Run pay-gated SoundBoost Cloud AI Mastering (`/api/tracks/{id}/master/`), Mix Doctor, or Audio Enhancer."""
+    client = SoundBoostClient()
+    act = action.strip().lower().replace("_", "-")
+    if act == "upload":
+        if not file_path:
+            raise typer.BadParameter("--file is required for action='upload'")
+        console.print_json(data=client.upload_audio(file_path))
+        return
+    if not track_id:
+        raise typer.BadParameter("--track-id is required for this action")
+    if act == "master":
+        eq_list: list[float] | None = None
+        if eq_csv:
+            eq_list = [float(x.strip()) for x in eq_csv.split(",") if x.strip()]
+        res = client.start_mastering(
+            track_id,
+            mode=mode,
+            prompt=prompt,
+            preset=preset,
+            eq_18band_db=eq_list,
+            stereo_width_pct=width,
+            target_lufs=target_lufs,
+        )
+    elif act == "status":
+        res = client.get_track_status(track_id)
+    elif act == "mix-doctor":
+        res = client.run_mix_doctor(track_id, genre=preset)
+    elif act == "enhance":
+        res = client.run_audio_enhancer(track_id)
+    elif act == "stats":
+        res = client.get_master_stats(track_id)
+    elif act == "stem-prep":
+        res = client.start_mastering_stem_prep(track_id)
+    else:
+        raise typer.BadParameter(f"Unknown master action '{action}'")
+    console.print_json(data=res)
 
 
 @app.command("tags")
@@ -422,28 +441,40 @@ def cmd_serve_mcp(
 
 @app.command("bulk-master")
 def cmd_bulk_master(
-    input_dir: str = typer.Argument(..., help="Input album/EP directory containing audio files"),
-    output_dir: str = typer.Argument(..., help="Output directory for cohesive mastered WAVs"),
+    action: str = typer.Argument("list", help="start | list | status | export-zip"),
+    tracks_csv: str | None = typer.Option(None, "--tracks", "-t", help="Comma-separated uploaded track IDs"),
+    batch_id: str | None = typer.Option(None, "--batch-id", "-b", help="Bulk mastering batch ID"),
+    mode: str = typer.Option("auto", "--mode", "-m", help="Mastering mode"),
     preset: str = typer.Option("pop", "--preset", "-p", help="Genre preset"),
+    prompt: str | None = typer.Option(None, "--prompt", help="Mastering prompt"),
     target_lufs: float = typer.Option(-14.0, "--lufs", "-l", help="Unified Album Target Integrated LUFS"),
-    ceiling: float = typer.Option(-1.0, "--ceiling", "-c", help="True-Peak brickwall ceiling in dBTP"),
-    width: float = typer.Option(100.0, "--width", "-w", help="Mid/Side stereo width %"),
-    bits: int = typer.Option(24, "--bits", "-b", help="Output WAV bit depth (16, 24, 32)"),
-    album: str | None = typer.Option(None, "--album", help="Album title tag"),
-    artist: str | None = typer.Option(None, "--artist", help="Artist name tag"),
 ) -> None:
-    """Batch-master an entire album/EP directory to a unified LUFS target, -1.0 dBTP ceiling & sequential track numbers."""
-    res = master_album_folder(
-        input_dir=input_dir,
-        output_dir=output_dir,
-        preset=preset,
-        stereo_width_pct=width,
-        target_lufs=target_lufs,
-        true_peak_ceiling_dbtp=ceiling,
-        bit_depth=bits,
-        album_title=album,
-        artist_name=artist,
-    )
+    """Manage pay-gated SoundBoost Cloud Bulk / Album Mastering (`/api/bulk-mastering/*`)."""
+    client = SoundBoostClient()
+    act = action.strip().lower().replace("_", "-")
+    if act == "list":
+        res = client.list_bulk_mastering_batches()
+    elif act == "start":
+        if not tracks_csv:
+            raise typer.BadParameter("--tracks is required for start")
+        tids = [x.strip() for x in tracks_csv.split(",") if x.strip()]
+        res = client.start_bulk_mastering(
+            tids,
+            mode=mode,
+            preset=preset,
+            prompt=prompt,
+            target_lufs=target_lufs,
+        )
+    elif act == "status":
+        if not batch_id:
+            raise typer.BadParameter("--batch-id is required for status")
+        res = client.get_bulk_mastering_status(batch_id)
+    elif act == "export-zip":
+        if not batch_id:
+            raise typer.BadParameter("--batch-id is required for export-zip")
+        res = client.get_bulk_mastering_export_zip(batch_id)
+    else:
+        raise typer.BadParameter(f"Unknown bulk-master action '{action}'")
     console.print_json(data=res)
 
 
@@ -480,17 +511,12 @@ def cmd_ingest(
 
 @app.command("prompt-eq")
 def cmd_prompt_eq(
-    prompt: str = typer.Argument(..., help="Natural-language mastering description (e.g. 'warm 808s, clean mud, airy 15kHz')"),
-    base_preset: str = typer.Option("flat", "--preset", "-p", help="Base genre preset"),
-    target_lufs: float = typer.Option(-14.0, "--lufs", "-l", help="Base target LUFS"),
-    cloud: bool = typer.Option(False, "--cloud", help="Also query SoundBoost Cloud `/api/ai/prompt`"),
+    prompt: str = typer.Argument(..., help="Natural-language mastering description"),
+    track_id: str | None = typer.Option(None, "--track-id", "-id", help="Optional SoundBoost track ID"),
 ) -> None:
-    """Translate a natural-language mastering prompt into an 18-Band EQ curve, stereo width, and LUFS target."""
-    res = translate_prompt_to_18band_eq(prompt, base_preset=base_preset, base_target_lufs=target_lufs)
-    if cloud:
-        client = SoundBoostClient()
-        res["cloud_ai_response"] = client.translate_ai_mastering_prompt(prompt)
-    console.print_json(data=res)
+    """Translate a natural-language mastering prompt via pay-gated SoundBoost Cloud `POST /api/ai/prompt` (`Toki`)."""
+    client = SoundBoostClient()
+    console.print_json(data=client.translate_ai_mastering_prompt(prompt, track_id=track_id))
 
 
 @app.command("voicings")
@@ -508,19 +534,23 @@ def cmd_voicings(
 
 @app.command("shifter")
 def cmd_shifter(
-    input_path: str = typer.Argument(..., help="Input audio file path"),
-    output_path: str = typer.Argument(..., help="Output pitch/time-shifted WAV file path"),
-    semitones: float = typer.Option(0.0, "--semitones", "-s", help="Semitone shift (-24 to +24)"),
-    speed: float = typer.Option(1.0, "--speed", "-x", help="Playback speed / time-stretch factor (0.25 to 4.0)"),
-    bits: int = typer.Option(24, "--bits", "-b", help="Output WAV bit depth (16, 24, 32)"),
+    original_id: str = typer.Argument(..., help="Studio original track ID"),
+    semitones: float = typer.Option(0.0, "--semitones", "-s", help="Semitone shift (-12 to +12)"),
+    speed: float = typer.Option(1.0, "--speed", "-x", help="Playback speed / time-stretch factor (0.5 to 2.0)"),
+    fmt: str = typer.Option("wav", "--format", "-f", help="Export format: wav | flac | mp3"),
+    bits: int = typer.Option(24, "--bits", "-b", help="Output bit depth (16, 24, 32)"),
 ) -> None:
-    """Render local offline Pitch-Shifting (`2^(st/12)`) and Phase-Vocoder Time-Stretching (Studio Modules 594-601)."""
-    res = render_local_pitch_and_time_stretch(
-        input_path=input_path,
-        output_path=output_path,
-        semitones=semitones,
-        speed_factor=speed,
-        bit_depth=bits,
+    """Export pitch-shifted and time-stretched stems via pay-gated SoundBoost Studio Cloud (`POST /api/studio/originals/{id}/export/`)."""
+    client = SoundBoostClient()
+    res = client.export_studio_stems(
+        original_id,
+        {
+            "semitones": semitones,
+            "pitch_shift_info": classify_pitch_shift_zone(round(semitones)),
+            "speed_factor": speed,
+            "format": fmt,
+            "bit_depth": bits,
+        },
     )
     console.print_json(data=res)
 

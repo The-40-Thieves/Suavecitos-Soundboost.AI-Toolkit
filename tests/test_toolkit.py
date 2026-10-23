@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from soundboost_toolkit.client import SoundBoostClient, SoundBoostPayGateError
 from soundboost_toolkit.constants import PRODUCTION_KAT_HASH, PRODUCTION_KAT_ID
 from soundboost_toolkit.crypto import (
     compute_mv_spending_limit,
@@ -162,8 +163,9 @@ class SoundBoostToolkitTests(unittest.TestCase):
         async def _verify_mcp() -> None:
             async with Client(mcp) as client:
                 tools = await client.list_tools()
-                self.assertEqual(len(tools), 23)
+                self.assertEqual(len(tools), 22)
                 tool_map = {t.name: t for t in tools}
+                self.assertNotIn("render_local_18band_master", tool_map)
 
                 # Verify ToolAnnotations on all tools
                 for t in tools:
@@ -177,7 +179,7 @@ class SoundBoostToolkitTests(unittest.TestCase):
                 self.assertTrue(tool_map["soundboost_bulk_and_album_mastering"].annotations.open_world_hint)
                 self.assertTrue(tool_map["soundboost_youtube_and_soundcloud_ingest"].annotations.open_world_hint)
                 self.assertTrue(tool_map["soundboost_music_video_and_shoots_director"].annotations.open_world_hint)
-                self.assertFalse(tool_map["studio_practice_voicings_and_local_shifter"].annotations.open_world_hint)
+                self.assertTrue(tool_map["studio_practice_voicings_and_cloud_shifter"].annotations.open_world_hint)
 
                 # Verify MCP Resources & Prompts
                 resources = await client.list_resources()
@@ -198,18 +200,35 @@ class SoundBoostToolkitTests(unittest.TestCase):
                 self.assertFalse(oauth_res.is_error)
 
                 voicings_res = await client.call_tool(
-                    "studio_practice_voicings_and_local_shifter",
+                    "studio_practice_voicings_and_cloud_shifter",
                     {"action": "chord_voicings", "chords": ["Cm", "G7"], "instrument": "guitar"},
                 )
                 self.assertFalse(voicings_res.is_error)
 
-                prompt_eq_res = await client.call_tool(
-                    "soundboost_voice_and_prompt_assistant",
-                    {"action": "local_prompt_to_eq", "prompt_or_speech": "warm 808 sub, clean mud, airy top end"},
-                )
-                self.assertFalse(prompt_eq_res.is_error)
-
         asyncio.run(_verify_mcp())
+
+    def test_pay_gate_enforcement_on_paid_and_studio_endpoints(self) -> None:
+        # Unauthenticated client (no token) must raise SoundBoostPayGateError on paid/studio endpoints
+        unauth_client = SoundBoostClient(access_token="", encrypted_da_cookie="")
+        unauth_client.access_token = None
+
+        self.assertTrue(unauth_client._is_public_free_url("https://converta.soundboost.ai/api/v1/formats"))
+        self.assertTrue(unauth_client._is_public_free_url("https://converta.soundboost.ai/api/v1/convert"))
+        self.assertFalse(unauth_client._is_public_free_url("https://converta.soundboost.ai/api/v1/stem-export"))
+        self.assertFalse(unauth_client._is_public_free_url("https://api.soundboost.ai/api/tracks/42/master/"))
+        self.assertFalse(unauth_client._is_public_free_url("https://api.soundboost.ai/api/bulk-mastering/start/"))
+        self.assertFalse(unauth_client._is_public_free_url("https://mastering.soundboost.ai/api/ai/prompt"))
+
+        with self.assertRaises(SoundBoostPayGateError):
+            unauth_client.start_mastering(42, mode="auto")
+        with self.assertRaises(SoundBoostPayGateError):
+            unauth_client.start_bulk_mastering([1, 2], mode="auto")
+        with self.assertRaises(SoundBoostPayGateError):
+            unauth_client.translate_ai_mastering_prompt("warm 808s")
+        with self.assertRaises(SoundBoostPayGateError):
+            unauth_client.start_studio_stem_split(42, "hifi_6stem")
+        with self.assertRaises(SoundBoostPayGateError):
+            unauth_client.request_converta_stem_export({"semitones": 2})
 
     def test_new_gap_clusters_voicings_shifter_album_and_mp3_inspector(self) -> None:
         # 1. Chord Voicing Diagrams (Module 534: Guitar, Ukulele, Piano)

@@ -49,13 +49,9 @@ from soundboost_toolkit.dsp import (
     classify_pitch_shift_zone,
     get_chord_voicing_diagram,
     inspect_mp3_gapless_headers,
-    master_album_folder,
     quantize_loop_to_bar_beat_sixteenth,
-    render_18band_master,
     render_lead_sheet_html,
-    render_local_pitch_and_time_stretch,
     snap_timestamp_to_synchronized_beat,
-    translate_prompt_to_18band_eq,
     transpose_chord_symbol,
 )
 from soundboost_toolkit.oauth import (
@@ -148,7 +144,7 @@ async def _poll_until_ready(
 @mcp.tool(
     tags={"dsp", "loudness", "audit"},
     annotations=ToolAnnotations(
-        title="Audit Audio Loudness (BS.1770-4) & DistroKid Readiness",
+        title="Audit Audio Loudness (BS.1770-4) & DistroKid Readiness (Free Tool)",
         read_only_hint=True,
         destructive_hint=False,
         idempotent_hint=True,
@@ -156,7 +152,8 @@ async def _poll_until_ready(
     ),
 )
 def audit_audio_loudness_and_release_readiness(file_path: str) -> dict[str, Any]:
-    """Run ITU-R BS.1770-4 Loudness (Integrated/Short-Term/Momentary LUFS), SoundBoost LRA (P95-P10),
+    """Run SoundBoost's Free LUFS Meter & Loudness Penalty Analyzer locally:
+    ITU-R BS.1770-4 Loudness (Integrated/Short-Term/Momentary LUFS), SoundBoost LRA (P95-P10),
     4x oversampled True Peak (dBTP) with 100ms binary-search peak timestamp, stereo correlation,
     6-band spectral profile, 9-platform Streaming Loudness Penalty table, and DistroKid readiness check.
     """
@@ -164,53 +161,9 @@ def audit_audio_loudness_and_release_readiness(file_path: str) -> dict[str, Any]
 
 
 @mcp.tool(
-    tags={"dsp", "mastering", "eq"},
-    task=TaskConfig(mode="optional"),
-    annotations=ToolAnnotations(
-        title="Render Local 18-Band Studio Master",
-        read_only_hint=False,
-        destructive_hint=False,
-        idempotent_hint=True,
-        open_world_hint=False,
-    ),
-)
-async def render_local_18band_master(
-    input_path: str,
-    output_path: str,
-    preset: str | None = None,
-    eq_gains_db: list[float] | None = None,
-    stereo_width_pct: float = 100.0,
-    target_lufs: float | None = -14.0,
-    true_peak_ceiling_dbtp: float = -1.0,
-    bit_depth: int = 24,
-    apply_tpdf_dither: bool = True,
-    ctx: Context | None = None,
-) -> dict[str, Any]:
-    """Render a local master using SoundBoost's 18-Band Graphic EQ (20 Hz to 15 kHz or a genre preset),
-    Mid/Side Stereo Width (0-200%), LUFS normalization, lookahead True-Peak brickwall limiter,
-    and 16/24-bit TPDF dithering. Supports background task execution.
-    """
-    await _notify_progress(ctx, 10.0, 100.0, f"Starting 18-band mastering render for {Path(input_path).name}")
-    result = await asyncio.to_thread(
-        render_18band_master,
-        input_path=input_path,
-        output_path=output_path,
-        eq_gains_db=eq_gains_db,
-        preset=preset,
-        stereo_width_pct=stereo_width_pct,
-        target_lufs=target_lufs,
-        true_peak_ceiling_dbtp=true_peak_ceiling_dbtp,
-        bit_depth=bit_depth,
-        apply_tpdf_dither=apply_tpdf_dither,
-    )
-    await _notify_progress(ctx, 100.0, 100.0, f"Completed master render -> {output_path}")
-    return result
-
-
-@mcp.tool(
     tags={"metadata", "id3", "isrc"},
     annotations=ToolAnnotations(
-        title="Read Audio Release Metadata & ISRC Tags",
+        title="Read Audio Release Metadata & ISRC Tags (Free Tool)",
         read_only_hint=True,
         destructive_hint=False,
         idempotent_hint=True,
@@ -988,10 +941,10 @@ def list_soundboost_platform_capabilities() -> dict[str, Any]:
 #     Local Pitch/Time-Stretch, Gapless MP3 Inspector, Track Lifecycle & Account/Billing
 # ---------------------------------------------------------------------------
 @mcp.tool(
-    tags={"mastering", "bulk", "album", "dsp"},
+    tags={"mastering", "bulk", "album", "cloud"},
     task=TaskConfig(mode="optional"),
     annotations=ToolAnnotations(
-        title="SoundBoost Bulk & Album Mastering Engine (Cloud & Local Folder)",
+        title="SoundBoost Cloud Bulk & Album Mastering Engine (Pay-Gated)",
         read_only_hint=False,
         destructive_hint=False,
         idempotent_hint=False,
@@ -999,54 +952,28 @@ def list_soundboost_platform_capabilities() -> dict[str, Any]:
     ),
 )
 async def soundboost_bulk_and_album_mastering(
-    action: str = "master_local_folder",
-    input_dir: str | None = None,
-    output_dir: str | None = None,
+    action: str = "cloud_list",
     track_ids: list[str | int] | None = None,
     batch_id: str | int | None = None,
     mode: str = "auto",
     preset: str = "pop",
     prompt: str | None = None,
     target_lufs: float = -14.0,
-    true_peak_ceiling_dbtp: float = -1.0,
-    stereo_width_pct: float = 100.0,
-    bit_depth: int = 24,
-    album_title: str | None = None,
-    artist_name: str | None = None,
+    reference_track_id: str | int | None = None,
     wait_for_completion: bool = False,
     poll_interval_sec: float = 3.0,
     max_wait_sec: float = 300.0,
     ctx: Context | None = None,
 ) -> Any:
-    """Batch-master an entire Album/EP either locally (`master_local_folder`) or via SoundBoost Cloud (`/api/bulk-mastering/*`):
-    - `master_local_folder`: Batch-master a directory of audio files locally with unified LUFS, -1.0 dBTP ceiling, 18-band EQ, and sequential track tags
-    - `cloud_start`: Start a cloud bulk mastering batch (`POST /api/bulk-mastering/start/`)
+    """Batch-master an entire Album/EP via SoundBoost's authenticated Cloud Bulk Mastering API (`/api/bulk-mastering/*`):
+    - `cloud_start`: Start a cloud bulk mastering batch (`POST /api/bulk-mastering/start/`, requires Pro/Plus authentication)
     - `cloud_list`: List all cloud bulk mastering batches (`GET /api/bulk-mastering/batches/`)
     - `cloud_status`: Poll cloud bulk mastering batch progress (`GET /api/bulk-mastering/batches/{id}/status/`)
     - `cloud_export_zip`: Fetch completed multi-track ZIP archive (`GET /api/bulk-mastering/batches/{id}/export-zip/`)
     """
     act = action.strip().lower()
-    if act == "master_local_folder":
-        if not input_dir or not output_dir:
-            raise ValueError("input_dir and output_dir are required for action='master_local_folder'")
-        await _notify_progress(ctx, 10.0, 100.0, f"Batch-mastering local album folder: {input_dir}")
-        res = await asyncio.to_thread(
-            master_album_folder,
-            input_dir=input_dir,
-            output_dir=output_dir,
-            preset=preset,
-            stereo_width_pct=stereo_width_pct,
-            target_lufs=target_lufs,
-            true_peak_ceiling_dbtp=true_peak_ceiling_dbtp,
-            bit_depth=bit_depth,
-            album_title=album_title,
-            artist_name=artist_name,
-        )
-        await _notify_progress(ctx, 100.0, 100.0, f"Completed album mastering ({res['total_tracks']} tracks).")
-        return res
-
     client = SoundBoostClient()
-    if act == "cloud_start":
+    if act in ("cloud_start", "start"):
         if not track_ids:
             raise ValueError("track_ids is required for action='cloud_start'")
         await _notify_progress(ctx, 15.0, 100.0, f"Starting cloud bulk mastering for {len(track_ids)} tracks...")
@@ -1057,6 +984,7 @@ async def soundboost_bulk_and_album_mastering(
             preset=preset,
             prompt=prompt,
             target_lufs=target_lufs,
+            reference_track_id=reference_track_id,
         )
         bid = res.get("id") or res.get("batch_id")
         if wait_for_completion and bid is not None:
@@ -1068,17 +996,17 @@ async def soundboost_bulk_and_album_mastering(
                 task_label="Cloud Bulk Mastering",
             )
         return res
-    if act == "cloud_list":
+    if act in ("cloud_list", "list"):
         return await asyncio.to_thread(client.list_bulk_mastering_batches)
-    if act == "cloud_status":
+    if act in ("cloud_status", "status"):
         if batch_id is None:
             raise ValueError("batch_id is required for action='cloud_status'")
         return await asyncio.to_thread(client.get_bulk_mastering_status, batch_id)
-    if act == "cloud_export_zip":
+    if act in ("cloud_export_zip", "export_zip"):
         if batch_id is None:
             raise ValueError("batch_id is required for action='cloud_export_zip'")
         return await asyncio.to_thread(client.get_bulk_mastering_export_zip, batch_id)
-    raise ValueError(f"Unsupported action '{action}'")
+    raise ValueError(f"Unsupported action '{action}'. Valid: cloud_start, cloud_list, cloud_status, cloud_export_zip")
 
 
 @mcp.tool(
@@ -1139,39 +1067,30 @@ async def soundboost_youtube_and_soundcloud_ingest(
 
 
 @mcp.tool(
-    tags={"ai", "prompt", "voice", "toki", "eq"},
+    tags={"ai", "prompt", "voice", "toki", "cloud"},
     annotations=ToolAnnotations(
-        title="Voice-Controlled AI Mastering & Natural-Language Toki Prompt Translator",
+        title="Voice-Controlled AI Mastering & Cloud Toki Prompt Engine (Pay-Gated)",
         read_only_hint=False,
         destructive_hint=False,
-        idempotent_hint=True,
+        idempotent_hint=False,
         open_world_hint=True,
     ),
 )
 def soundboost_voice_and_prompt_assistant(
-    action: str = "local_prompt_to_eq",
+    action: str = "cloud_ai_prompt",
     prompt_or_speech: str = "warm low end, clean mud, crisp vocal presence, airy 15kHz top end",
-    base_preset: str = "flat",
-    base_target_lufs: float = -14.0,
     track_id: str | int | None = None,
 ) -> dict[str, Any]:
-    """Translate natural-language or spoken mastering instructions into 18-Band EQ parameters (`Toki` & `Deepgram` Voice APIs):
-    - `local_prompt_to_eq`: Offline deterministic translator mapping natural-language vibe descriptors to an 18-band EQ curve, stereo width %, and LUFS target
-    - `cloud_ai_prompt`: Translate prompt via SoundBoost Cloud AI (`POST /api/ai/prompt`)
+    """Drive SoundBoost's authenticated Cloud `Toki` Prompt Engine & `Deepgram` Voice-Controlled Mastering APIs:
+    - `cloud_ai_prompt`: Translate natural-language mastering prompt via SoundBoost Cloud AI (`POST /api/ai/prompt`)
     - `toki_check`: Check status of the Toki AI Mastering assistant (`GET /api/toki/check/`)
     - `mastering_voice_token`: Acquire Deepgram token for Voice-Controlled Mastering (`POST /api/mastering-voice/deepgram-token`)
     - `mastering_voice_speech`: Submit spoken mastering revision transcript (`POST /api/mastering-voice/speech`)
     - `mv_voice_token`: Acquire Deepgram token for Voice-Controlled Music Video Director (`POST /api/music-video-voice/deepgram-token`)
     """
     act = action.strip().lower()
-    if act == "local_prompt_to_eq":
-        return translate_prompt_to_18band_eq(
-            prompt=prompt_or_speech,
-            base_preset=base_preset,
-            base_target_lufs=base_target_lufs,
-        )
     client = SoundBoostClient()
-    if act == "cloud_ai_prompt":
+    if act in ("cloud_ai_prompt", "prompt"):
         return client.translate_ai_mastering_prompt(prompt_or_speech, track_id=track_id)
     if act == "toki_check":
         return client.check_toki_assistant()
@@ -1281,31 +1200,36 @@ async def soundboost_music_video_and_shoots_director(
 
 
 @mcp.tool(
-    tags={"dsp", "practice", "chords", "pitch-shift", "mp3", "gapless"},
+    tags={"cloud", "studio", "practice", "chords", "pitch-shift", "mp3", "gapless"},
     task=TaskConfig(mode="optional"),
     annotations=ToolAnnotations(
-        title="Studio Practice Chord Voicings (Guitar/Ukulele/Piano), Local Pitch/Time-Stretch & Gapless MP3 Inspector",
+        title="Studio Cloud Pitch/Time-Stretch Stem Export (Pay-Gated), Chord Voicings & Gapless MP3 Inspector",
         read_only_hint=False,
         destructive_hint=False,
         idempotent_hint=True,
-        open_world_hint=False,
+        open_world_hint=True,
     ),
 )
-async def studio_practice_voicings_and_local_shifter(
+async def studio_practice_voicings_and_cloud_shifter(
     action: str = "chord_voicings",
+    original_id: str | int | None = None,
     chords: list[str] | None = None,
     instrument: str = "guitar",
     input_path: str | None = None,
-    output_path: str | None = None,
     semitones: float = 0.0,
     speed_factor: float = 1.0,
+    loop_start_sec: float | None = None,
+    loop_end_sec: float | None = None,
+    export_format: str = "wav",
     bit_depth: int = 24,
+    sample_rate: int = 48000,
+    stem_volumes: dict[str, float] | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Local Studio Practice & Calibration tools (exact replicas of Studio Modules 534, 590-591, 594-601):
-    - `chord_voicings`: Generate interactive Chord Fingering Voicings & ASCII fretboard/keyboard diagrams for `guitar` (6-string), `ukulele` (4-string), or `piano` (MIDI + keys)
-    - `pitch_time_stretch`: Render local offline Pitch-Shifting (`semitones` in [-24, +24], pitchFactor = 2^(st/12)) and Phase-Vocoder Time-Stretching (`speed_factor` in [0.25, 4.0])
-    - `inspect_gapless_mp3`: Parse binary MP3 frames (`1152` samples/frame), `Xing`/`Info`/`LAME3.100` gapless headers, encoder delay (`576`), decoder delay (`529`), and total priming samples (`1105`)
+    """Studio Practice Voicings, Gapless MP3 Inspector, and Pay-Gated Cloud Pitch/Time-Stretch Stem Exporter:
+    - `cloud_stem_export`: Export pitched (`semitones`) / time-stretched (`speed_factor`) stems or loop segments via SoundBoost's authenticated Cloud Studio endpoints (`POST /api/studio/originals/{id}/export/` & `POST https://converta.soundboost.ai/api/v1/stem-export`)
+    - `chord_voicings`: Generate interactive Chord Fingering Voicings & ASCII fretboard/keyboard diagrams for `guitar` (6-string), `ukulele` (4-string), or `piano` (MIDI + keys, Module 534)
+    - `inspect_gapless_mp3`: Parse binary MP3 frames (`1152` samples/frame), `Xing`/`Info`/`LAME3.100` gapless headers, encoder delay (`576`), decoder delay (`529`), and total priming samples (`1105`, Modules 590-591)
     """
     act = action.strip().lower()
     if act == "chord_voicings":
@@ -1316,25 +1240,31 @@ async def studio_practice_voicings_and_local_shifter(
             "chord_count": len(diagrams),
             "voicings": diagrams,
         }
-    if act == "pitch_time_stretch":
-        if not input_path or not output_path:
-            raise ValueError("input_path and output_path are required for action='pitch_time_stretch'")
+    if act in ("cloud_stem_export", "pitch_time_stretch"):
+        client = SoundBoostClient()
+        export_spec: dict[str, Any] = {
+            "semitones": semitones,
+            "pitch_shift_info": classify_pitch_shift_zone(round(semitones)),
+            "speed_factor": speed_factor,
+            "format": export_format,
+            "bit_depth": bit_depth,
+            "sample_rate": sample_rate,
+        }
+        if loop_start_sec is not None and loop_end_sec is not None:
+            export_spec["loop_start"] = loop_start_sec
+            export_spec["loop_end"] = loop_end_sec
+        if stem_volumes:
+            export_spec["stem_volumes"] = stem_volumes
         await _notify_progress(
             ctx,
-            15.0,
+            20.0,
             100.0,
-            f"Rendering local pitch shift ({semitones:+.1f} st) & time stretch ({speed_factor:.2f}x)...",
+            f"Submitting pay-gated Studio cloud pitch/time-stretch export ({semitones:+.1f} st, {speed_factor:.2f}x)...",
         )
-        res = await asyncio.to_thread(
-            render_local_pitch_and_time_stretch,
-            input_path=input_path,
-            output_path=output_path,
-            semitones=semitones,
-            speed_factor=speed_factor,
-            bit_depth=bit_depth,
-        )
-        await _notify_progress(ctx, 100.0, 100.0, f"Saved pitch/time-stretched audio -> {output_path}")
-        return res
+        if original_id is not None:
+            export_spec["original_id"] = original_id
+            return await asyncio.to_thread(client.export_studio_stems, original_id, export_spec)
+        return await asyncio.to_thread(client.request_converta_stem_export, export_spec)
     if act == "inspect_gapless_mp3":
         if not input_path:
             raise ValueError("input_path is required for action='inspect_gapless_mp3'")
