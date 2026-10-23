@@ -44,7 +44,7 @@ from soundboost_toolkit.tagging import read_audio_tags, write_audio_tags
 
 app = typer.Typer(
     name="soundboost",
-    help="Suavecito's Soundboost.AI Toolkit — CLI, FastMCP Server, Local BS.1770-4 DSP & REAPER Suite.",
+    help="Master, split, tag, and ship your tracks. Unofficial SoundBoost.ai toolkit, built with their permission.",
     no_args_is_help=True,
 )
 console = Console()

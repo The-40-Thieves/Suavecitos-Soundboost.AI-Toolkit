@@ -1,7 +1,7 @@
-"""Suavecito's Soundboost.AI Toolkit.
+"""Suavecito's SoundBoost.ai Toolkit.
 
-Complete CLI, FastMCP Server, OAuth 2.1 & Bearer-Token API Client, Local ITU-R BS.1770-4
-DSP Engine, and REAPER JSFX/ReaScript Suite for SoundBoost.ai (Diktatorial Suite).
+Master, split, tag, and ship your tracks from the terminal, your AI agent, or REAPER.
+Unofficial CLI + MCP server for SoundBoost.ai, built with their permission.
 """
 
 __version__ = "1.0.0"
