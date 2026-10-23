@@ -54,10 +54,12 @@ from soundboost_toolkit.oauth import (
 from soundboost_toolkit.reaper_integration import (
     ReaperLiveBridge,
     build_osc_packet,
+    build_reaper_to_shoots_storyboard,
     build_rfxchain_content,
     generate_soundboost_rpp_project,
     inspect_reaper_environment,
     install_reaper_assets,
+    render_reaper_video_pipeline,
 )
 from soundboost_toolkit.tagging import (
     normalize_and_validate_isrc,
@@ -561,6 +563,49 @@ class SoundBoostToolkitTests(unittest.TestCase):
             eq_push = bridge.push_18band_eq_to_reaper(prompt="warm low end and airy top")
             self.assertEqual(len(eq_push["eq_18band_db"]), 18)
             self.assertTrue(bridge.inbox_path.exists())
+
+            # 4. Verify REAPER -> Shoots (h3-max) Beat-Locked Storyboard Generator
+            sb_manifest = build_reaper_to_shoots_storyboard(
+                audio_path=stems_dir / "01_Kick.wav",
+                bpm=128.0,
+                bars_per_scene=1,
+                chords=[{"chord": "Cm", "start_sec": 0.0, "end_sec": 2.0}],
+                lyrics=[{"text": "Step into the light", "start_sec": 0.1}],
+                plan_tier="director",
+            )
+            self.assertEqual(sb_manifest["engine"], "h3-max")
+            self.assertGreaterEqual(sb_manifest["scene_count"], 1)
+            self.assertGreater(sb_manifest["spending_limit_credits"], sb_manifest["quoted_credits"])
+
+            # 5. Verify Local Audio-Reactive MP4 Video Pipeline + Companion REAPER .RPP
+            mp4_out = tmp_path / "Canvas_9x16.mp4"
+            video_rpp_out = tmp_path / "Video_Session.RPP"
+            vid_res = render_reaper_video_pipeline(
+                audio_path=stems_dir / "01_Kick.wav",
+                output_mp4_path=mp4_out,
+                mode="spotify_canvas_9x16",
+                fps=15.0,
+                max_duration_sec=0.25,
+                preset="hip_hop",
+                title="Midnight Hustle",
+                artist="Suavecito",
+                isrc="US-S1Z-26-00001",
+                chords=[{"chord": "Cm", "start_sec": 0.0, "end_sec": 2.0}],
+                lyrics=[{"text": "Step into the light", "start_sec": 0.0, "end_sec": 0.25}],
+                output_rpp_path=video_rpp_out,
+                bpm=128.0,
+            )
+            self.assertTrue(mp4_out.exists())
+            self.assertGreater(vid_res["mp4_size_bytes"], 1000)
+            self.assertTrue(video_rpp_out.exists())
+            video_rpp_text = video_rpp_out.read_text(encoding="utf-8")
+            self.assertIn('<VIDEO_EFFECT "Video processor" ""', video_rpp_text)
+            self.assertIn("<SOURCE VIDEO", video_rpp_text)
+            self.assertIn('JS "misc/video_sample_peeker"', video_rpp_text)
+
+            # Verify live video scene insertion via ReaperLiveBridge
+            v_ins = bridge.insert_video_scene_to_reaper(mp4_out, pos_sec=0.0)
+            self.assertEqual(v_ins["command"], "insert_video_item")
 
 
 if __name__ == "__main__":

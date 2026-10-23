@@ -42,10 +42,13 @@ import httpx
 from soundboost_toolkit.constants import (
     MASTERING_EQ_FREQUENCIES_HZ,
     MASTERING_GENRE_PRESETS,
+    MV_CHARACTER_REF_CAPS,
     STREAMING_TARGETS,
 )
+from soundboost_toolkit.crypto import compute_mv_spending_limit
 from soundboost_toolkit.dsp import (
     analyze_audio_file,
+    render_18band_master,
     translate_prompt_to_18band_eq,
 )
 
@@ -758,6 +761,85 @@ class ReaperLiveBridge:
             "ipc_dispatch": ipc_res,
         }
 
+    def insert_video_scene_to_reaper(
+        self,
+        video_path: str | Path,
+        pos_sec: float = 0.0,
+        open_video_window: bool = True,
+    ) -> dict[str, Any]:
+        """Insert a video clip or image scene (`.mp4`, `.mov`, `.webm`, `.gif`, `.png`, `.jpg`)
+        onto the live REAPER `SHOOTS / 9:16 SPOTIFY CANVAS VIDEO` track via `Suavecito_Live_Bridge_Daemon.lua`.
+        """
+        resolved = Path(video_path).expanduser().resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Video/scene file not found: {resolved}")
+        return self.dispatch_ipc_command(
+            "insert_video_item",
+            {
+                "video_path": str(resolved),
+                "pos_sec": round(float(pos_sec), 3),
+                "open_video_window": 1 if open_video_window else 0,
+            },
+        )
+
+
+def build_reaper_video_processor_fx_chunk(
+    title: str | None = None,
+    artist: str | None = None,
+    isrc: str | None = None,
+) -> str:
+    """Build a native REAPER `<VIDEO_EFFECT "Video processor" "">` RPP chunk (`reaper_video.dll`)
+    attached to `//@gmem=SuavecitoSoundBoost` for real-time 18-band EQ + Peak/GR/Phase HUD rendering.
+    """
+    hud_label = " — ".join(p for p in (artist, title, isrc) if p) or "Suavecito SoundBoost.AI Master"
+    hud_label = hud_label.replace('"', "'")
+    eel_lines = [
+        "// Suavecito's SoundBoost.AI 9:16 Spotify Canvas & Shoots (h3-max) Audio-Reactive Video Processor",
+        "//@gmem=SuavecitoSoundBoost",
+        '//@param1:react_gain "Audio Reactivity" 1.0 0.1 3.0 1.0 0.05',
+        '//@param2:show_hud "Show 18-Band EQ HUD (1=Yes,0=No)" 1 0 1 1 1',
+        "input = 0;",
+        "project_wh_valid === 0 ? input_info(input, project_w, project_h);",
+        "gfx_blit(input, 1);",
+        "show_hud >= 0.5 ? (",
+        "  bar_area_w = project_w * 0.84;",
+        "  bar_area_x = project_w * 0.08;",
+        "  bar_base_y = project_h * 0.88;",
+        "  bar_max_h  = project_h * 0.18;",
+        "  slot_w = bar_area_w / 18;",
+        "  gfx_set(0.05, 0.07, 0.12, 0.72);",
+        "  gfx_fillrect(bar_area_x - 12, bar_base_y - bar_max_h - 44, bar_area_w + 24, bar_max_h + 64);",
+        '  gfx_setfont(1, "Segoe UI", max(14, project_h * 0.018));',
+        "  gfx_set(0.92, 0.96, 1.0, 0.95);",
+        f'  gfx_str_draw("{hud_label}", bar_area_x, bar_base_y - bar_max_h - 34);',
+        "  i = 0;",
+        "  loop(18,",
+        "    gain_db = gmem[10 + i] * react_gain;",
+        "    norm = min(max((gain_db + 12.0) / 24.0, 0.06), 1.0);",
+        "    h = norm * bar_max_h;",
+        "    bx = bar_area_x + i * slot_w + 2;",
+        "    by = bar_base_y - h;",
+        "    t = i / 17.0;",
+        "    gfx_set(0.15 + 0.80 * t, 0.78 - 0.42 * t, 0.96 - 0.18 * t, 0.92);",
+        "    gfx_fillrect(bx, by, max(slot_w - 4, 2), h);",
+        "    i += 1;",
+        "  );",
+        ");",
+    ]
+    code_body = "\n".join(f"          |{line}" for line in eel_lines)
+    return (
+        "    <FXCHAIN\n"
+        "      BYPASS 0 0 0\n"
+        '      <VIDEO_EFFECT "Video processor" ""\n'
+        "        <CODE\n"
+        f"{code_body}\n"
+        "        >\n"
+        "        CODEPARM 1.0000000000 1.0000000000 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
+        "      >\n"
+        "      WAK 0 0\n"
+        "    >\n"
+    )
+
 
 # ---------------------------------------------------------------------------
 # 4. Complete `.RPP` REAPER 7.82 Multitrack Session Generator
@@ -801,6 +883,8 @@ def generate_soundboost_rpp_project(
     target_platform: str = "spotify",
     add_drum_midi_triggers: bool = True,
     include_video_canvas_track: bool = True,
+    video_scenes: list[str | Path | dict[str, Any]] | None = None,
+    video_aspect: str = "9:16",
 ) -> dict[str, Any]:
     """Generate a complete, ready-to-open REAPER 7.82 `.RPP` multitrack session containing:
     - Hierarchical folder buses (`DRUM KIT BUS`, `VOCAL BUS`, `INSTRUMENT BUS`) with native track icons
@@ -952,7 +1036,7 @@ def generate_soundboost_rpp_project(
     if meta_tags:
         render_meta_block = "  <RENDER_METADATA\n" + "\n".join(meta_tags) + "\n  >\n"
 
-    # Build Master FX Chain block
+    # Build Master FX Chain block (18-Band Mastering EQ + Loudness Meter + Video Sample Peeker)
     slider_vals = " ".join(f"{g:.2f}" for g in gains) + f" {width:.1f} {drive:.2f} {ceil:.2f}"
     master_fx_block = (
         "  <MASTERFXLIST\n"
@@ -964,6 +1048,11 @@ def generate_soundboost_rpp_project(
         "    BYPASS 0 0 0\n"
         '    <JS "analysis/loudness_meter" ""\n'
         "      0 1 1 1 1 1 1 0 0 0 -14 -1 1 0 15 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -100 -100 -100 -100 -100 0 0\n"
+        "    >\n"
+        "    WAK 0 0\n"
+        "    BYPASS 0 0 0\n"
+        '    <JS "misc/video_sample_peeker" ""\n'
+        "      1.0\n"
         "    >\n"
         "    WAK 0 0\n"
         "  >\n"
@@ -1050,8 +1139,40 @@ def generate_soundboost_rpp_project(
                 }
             )
 
-    if include_video_canvas_track:
+    video_items_added = 0
+    if include_video_canvas_track or video_scenes:
         v_col = _rgb_to_reaper_native(236, 72, 153)
+        v_fx_chunk = build_reaper_video_processor_fx_chunk(title=title, artist=artist, isrc=isrc)
+        v_items_chunks: list[str] = []
+        bar_sec = (60.0 / max(20.0, bpm)) * float(time_sig_num)
+        cursor_sec = 0.0
+        for idx_s, vs in enumerate(video_scenes or []):
+            if isinstance(vs, dict):
+                v_file = Path(str(vs.get("file") or vs.get("path") or "")).expanduser().resolve()
+                v_pos = float(vs.get("start_sec", cursor_sec))
+                v_len = float(vs.get("length_sec", vs.get("duration_sec", bar_sec * 2.0)))
+                v_name = str(vs.get("name") or f"Scene_{idx_s + 1:02d}_{v_file.name}")
+            else:
+                v_file = Path(vs).expanduser().resolve()
+                v_pos = cursor_sec
+                v_len = bar_sec * 2.0
+                v_name = f"Scene_{idx_s + 1:02d}_{v_file.name}"
+            cursor_sec = v_pos + v_len
+            v_items_chunks.append(
+                "    <ITEM\n"
+                f"      POSITION {v_pos:.3f}\n"
+                f"      LENGTH {v_len:.3f}\n"
+                f'      NAME "{v_name}"\n'
+                "      VOLPAN 1 0 1 -1\n"
+                "      SOFFS 0\n"
+                "      PLAYRATE 1 1 0 -1 0 0.0025\n"
+                "      <SOURCE VIDEO\n"
+                f'        FILE "{v_file}"\n'
+                "      >\n"
+                "    >\n"
+            )
+            video_items_added += 1
+
         track_blocks.append(
             "  <TRACK\n"
             '    NAME "SHOOTS / 9:16 SPOTIFY CANVAS VIDEO (h3-max gmem)"\n'
@@ -1059,11 +1180,26 @@ def generate_soundboost_rpp_project(
             '    TRACKIMGFN "video.png"\n'
             "    ISBUS 0 0\n"
             "    VOLPAN 1 0 -1 -1 1\n"
-            "  >"
+            f"{v_fx_chunk}"
+            + "".join(v_items_chunks)
+            + "  >"
         )
         created_tracks_summary.append(
-            {"name": "SHOOTS / 9:16 SPOTIFY CANVAS VIDEO (h3-max gmem)", "type": "video_canvas", "icon": "video.png"}
+            {
+                "name": "SHOOTS / 9:16 SPOTIFY CANVAS VIDEO (h3-max gmem)",
+                "type": "video_canvas",
+                "icon": "video.png",
+                "video_processor_gmem": "SuavecitoSoundBoost",
+                "video_scenes_count": video_items_added,
+            }
         )
+
+    aspect_dims = {
+        "9:16": (1080, 1920),
+        "16:9": (1920, 1080),
+        "1:1": (1080, 1080),
+    }
+    vw, vh = aspect_dims.get(video_aspect.strip(), (1080, 1920))
 
     rpp_content = (
         '<REAPER_PROJECT 0.1 "7.82/win64" 1729680000\n'
@@ -1079,7 +1215,7 @@ def generate_soundboost_rpp_project(
         "  MAXPROJLEN 0 600\n"
         "  GRID 3199 8 1 8 1 0 0 0\n"
         "  TIMEMODE 1 5 -1 30 0 0 -1\n"
-        "  VIDEO_CONFIG 0 0 256\n"
+        f"  VIDEO_CONFIG {vw} {vh} 256\n"
         "  PANMODE 3\n"
         "  CURSOR 0\n"
         "  ZOOM 100 0 0\n"
@@ -1143,5 +1279,398 @@ def generate_soundboost_rpp_project(
         "clipping_markers_injected": len(clipping_markers),
         "chord_regions_injected": len(chords or []),
         "lyric_markers_injected": len(lyrics or []),
+        "video_aspect": video_aspect,
+        "video_dimensions": f"{vw}x{vh}",
+        "video_scenes_injected": video_items_added,
         "audit_report": audit_report,
     }
+
+
+# ---------------------------------------------------------------------------
+# 5. Bidirectional REAPER <-> Video Pipeline (`Shoots` h3-max Storyboard + OpenCV/PIL MP4 Renderer)
+# ---------------------------------------------------------------------------
+def build_reaper_to_shoots_storyboard(
+    audio_path: str | Path,
+    bpm: float = 120.0,
+    time_sig_num: int = 4,
+    bars_per_scene: int = 4,
+    visual_style_prompt: str = "Cinematic neon nocturnal cyberpunk performance, anamorphic 35mm lens",
+    plan_tier: str = "director",
+    chords: list[dict[str, Any]] | None = None,
+    lyrics: list[dict[str, Any]] | None = None,
+    aspect_ratio: str = "9:16",
+) -> dict[str, Any]:
+    """Analyze a REAPER audio bounce or stem (`audio_path`), quantize scene cuts to exact musical
+    bar boundaries (`bars_per_scene`), classify each bar window's RMS/transient energy into camera
+    direction cues, attach synchronized Chords & Lyrics, compute the `h3-max` credit budget cap,
+    and return both a `Shoots` (`POST /api/shoots/`) payload and REAPER timeline regions.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    path = Path(audio_path).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Audio file not found: {path}")
+
+    samples, sr = sf.read(str(path), always_2d=True, dtype="float64")
+    total_sec = samples.shape[0] / float(max(1, sr))
+    bar_sec = (60.0 / max(20.0, float(bpm))) * float(max(1, time_sig_num))
+    scene_dur = max(1.5, bar_sec * float(max(1, bars_per_scene)))
+
+    mono = np.mean(samples, axis=1)
+    global_rms = float(np.sqrt(np.mean(np.square(mono)) + 1e-12))
+
+    scenes: list[dict[str, Any]] = []
+    reaper_regions: list[dict[str, Any]] = []
+    idx = 0
+    t_start = 0.0
+    while t_start < total_sec - 0.05:
+        t_end = min(total_sec, t_start + scene_dur)
+        s0 = round(t_start * sr)
+        s1 = min(samples.shape[0], round(t_end * sr))
+        seg = mono[s0:s1]
+        seg_rms = float(np.sqrt(np.mean(np.square(seg)) + 1e-12)) if seg.size > 0 else 0.0
+        seg_peak = float(np.max(np.abs(seg))) if seg.size > 0 else 0.0
+        rel_energy = seg_rms / max(global_rms, 1e-6)
+
+        if rel_energy >= 1.22 or seg_peak >= 0.92:
+            energy_tier = "drop_peak"
+            camera_motion = "Kinetic whip-pan on downbeat, rapid cut, anamorphic lens flare, high-energy motion"
+        elif rel_energy >= 0.95:
+            energy_tier = "lift_high"
+            camera_motion = "Dynamic low-angle gimbal arc, high-contrast key lighting, wide performance framing"
+        elif rel_energy >= 0.65:
+            energy_tier = "groove_mid"
+            camera_motion = "Smooth tracking steadicam, medium performance shot, rhythmic camera sway"
+        else:
+            energy_tier = "intimate_low"
+            camera_motion = "Slow push-in dolly, shallow depth of field, atmospheric rim lighting"
+
+        # Find active chords and lyrics in [t_start, t_end]
+        active_chords = [
+            str(c.get("chord") or c.get("symbol"))
+            for c in (chords or [])
+            if float(c.get("start_sec", c.get("start", 0.0))) < t_end
+            and float(c.get("end_sec", c.get("end", t_end))) >= t_start
+        ]
+        active_lyrics = [
+            str(l.get("text", "")).strip()
+            for l in (lyrics or [])
+            if t_start <= float(l.get("start_sec", l.get("start", 0.0))) < t_end
+            and str(l.get("text", "")).strip()
+        ]
+
+        idx += 1
+        bar_start = (idx - 1) * bars_per_scene + 1
+        bar_end = bar_start + bars_per_scene - 1
+        lyric_cue = " ".join(active_lyrics) if active_lyrics else None
+        chord_cue = " -> ".join(active_chords) if active_chords else None
+
+        prompt_parts = [
+            visual_style_prompt,
+            f"Camera: {camera_motion}.",
+            f"Bars {bar_start}-{bar_end} ({energy_tier.upper()}).",
+        ]
+        if chord_cue:
+            prompt_parts.append(f"Harmonic progression: {chord_cue}.")
+        if lyric_cue:
+            prompt_parts.append(f'Lyric performance cue: "{lyric_cue}".')
+
+        scenes.append(
+            {
+                "scene_number": idx,
+                "bars": f"{bar_start}-{bar_end}",
+                "start_sec": round(t_start, 3),
+                "end_sec": round(t_end, 3),
+                "duration_sec": round(t_end - t_start, 3),
+                "energy_tier": energy_tier,
+                "relative_energy": round(rel_energy, 3),
+                "peak_dbfs": round(20.0 * float(np.log10(max(seg_peak, 1e-9))), 2),
+                "camera_motion": camera_motion,
+                "active_chords": active_chords,
+                "active_lyrics": active_lyrics,
+                "scene_prompt": " ".join(prompt_parts),
+            }
+        )
+        reaper_regions.append(
+            {
+                "chord": f"SCENE {idx:02d} [{energy_tier.upper()}] {chord_cue or ''}".strip(),
+                "start_sec": round(t_start, 3),
+                "end_sec": round(t_end, 3),
+            }
+        )
+        t_start = t_end
+
+    tier_norm = plan_tier.strip().lower()
+    quoted_credits = max(20, len(scenes) * 25)
+    spending_cap = compute_mv_spending_limit(quoted_credits)
+
+    return {
+        "engine": "h3-max",
+        "audio_path": str(path),
+        "duration_sec": round(total_sec, 3),
+        "bpm": bpm,
+        "bars_per_scene": bars_per_scene,
+        "aspect_ratio": aspect_ratio,
+        "scene_count": len(scenes),
+        "plan_tier": tier_norm,
+        "quoted_credits": quoted_credits,
+        "spending_limit_credits": spending_cap,
+        "retake_headroom_credits": spending_cap - quoted_credits,
+        "character_reference_cap": MV_CHARACTER_REF_CAPS.get(tier_norm, 1),
+        "auto_qc_enabled": tier_norm in ("director", "studio"),
+        "deep_research_enabled": tier_norm == "studio",
+        "scenes": scenes,
+        "reaper_scene_regions": reaper_regions,
+        "shoots_api_payload": {
+            "engine": "h3-max",
+            "aspect_ratio": aspect_ratio,
+            "bpm": bpm,
+            "style_prompt": visual_style_prompt,
+            "scenes": [
+                {
+                    "scene_index": s["scene_number"],
+                    "start_sec": s["start_sec"],
+                    "end_sec": s["end_sec"],
+                    "prompt": s["scene_prompt"],
+                }
+                for s in scenes
+            ],
+        },
+    }
+
+
+def render_reaper_video_pipeline(
+    audio_path: str | Path,
+    output_mp4_path: str | Path,
+    mode: str = "spotify_canvas_9x16",
+    fps: float = 30.0,
+    max_duration_sec: float | None = 8.0,
+    preset: str = "pop",
+    prompt: str | None = None,
+    eq_18band_db: list[float] | None = None,
+    title: str | None = None,
+    artist: str | None = None,
+    isrc: str | None = None,
+    background_image_path: str | Path | None = None,
+    chords: list[dict[str, Any]] | None = None,
+    lyrics: list[dict[str, Any]] | None = None,
+    export_mastered_wav: bool = True,
+    output_rpp_path: str | Path | None = None,
+    bpm: float = 120.0,
+) -> dict[str, Any]:
+    """Render an audio-reactive `.mp4` video (`spotify_canvas_9x16` `540x960` / `1080x1920`,
+    `social_vertical_9x16`, or `music_video_16x9` `1280x720` / `1920x1080`) synchronized with
+    SoundBoost's 18-Band Mastering EQ (`20 Hz -> 18.5 kHz`), Stereo Correlation meter, Chords,
+    Karaoke Lyrics, and Title/Artist/ISRC HUD, plus optional `.RPP` project generation so the
+    rendered video opens directly on REAPER's Video Timeline!
+    """
+    import cv2
+    import numpy as np
+    import scipy.signal as sg
+    import soundfile as sf
+    from PIL import Image, ImageDraw
+
+    src_audio = Path(audio_path).expanduser().resolve()
+    if not src_audio.exists():
+        raise FileNotFoundError(f"Source audio not found: {src_audio}")
+
+    out_mp4 = Path(output_mp4_path).expanduser().resolve()
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+
+    # Optionally render the 18-Band Mastered WAV companion
+    master_wav_path: Path | None = None
+    master_report: dict[str, Any] | None = None
+    if export_mastered_wav:
+        master_wav_path = out_mp4.with_name(f"{out_mp4.stem}_master_24bit.wav")
+        master_report = render_18band_master(
+            input_path=src_audio,
+            output_path=master_wav_path,
+            eq_gains_db=eq_18band_db,
+            preset=None if eq_18band_db else preset,
+            target_lufs=-14.0,
+            true_peak_ceiling_dbtp=-1.0,
+            bit_depth=24,
+        )
+
+    active_audio_file = master_wav_path if (master_wav_path and master_wav_path.exists()) else src_audio
+    samples, sr = sf.read(str(active_audio_file), always_2d=True, dtype="float64")
+    total_sec = samples.shape[0] / float(max(1, sr))
+    if max_duration_sec is not None and max_duration_sec > 0:
+        render_sec = min(total_sec, float(max_duration_sec))
+    else:
+        render_sec = total_sec
+
+    mode_norm = mode.strip().lower()
+    if "16x9" in mode_norm or "16:9" in mode_norm or "landscape" in mode_norm:
+        frame_w, frame_h = 1280, 720
+        aspect_str = "16:9"
+    elif "1x1" in mode_norm or "square" in mode_norm:
+        frame_w, frame_h = 720, 720
+        aspect_str = "1:1"
+    else:
+        frame_w, frame_h = 540, 960
+        aspect_str = "9:16"
+
+    # Resolve 18-band EQ gains for visual HUD
+    curve = GENRE_PRESET_EQ_CURVES.get(preset.lower(), GENRE_PRESET_EQ_CURVES["pop"])
+    if prompt:
+        tr = translate_prompt_to_18band_eq(prompt)
+        eq_gains = list(tr["eq_18band_db"])
+    elif eq_18band_db and len(eq_18band_db) == 18:
+        eq_gains = [float(x) for x in eq_18band_db]
+    else:
+        eq_gains = list(curve["eq_18band_db"])
+
+    # Prepare optional background image or dark studio gradient
+    bg_bgr = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
+    for y in range(frame_h):
+        ratio = y / float(max(1, frame_h - 1))
+        bg_bgr[y, :, 0] = int(28 + 20 * ratio)  # B
+        bg_bgr[y, :, 1] = int(14 + 10 * ratio)  # G
+        bg_bgr[y, :, 2] = int(12 + 24 * ratio)  # R
+
+    if background_image_path:
+        bg_path = Path(background_image_path).expanduser().resolve()
+        if bg_path.exists():
+            pil_bg = Image.open(bg_path).convert("RGB").resize((frame_w, frame_h))
+            rgb_arr = np.array(pil_bg, dtype=np.uint8)
+            bg_bgr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+            bg_bgr = (bg_bgr.astype(np.float32) * 0.45).astype(np.uint8)
+
+    total_frames = max(1, round(render_sec * fps))
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(out_mp4), fourcc, float(fps), (frame_w, frame_h))
+
+    mono = np.mean(samples, axis=1)
+    freqs_18 = np.array(MASTERING_EQ_FREQUENCIES_HZ, dtype=np.float64)
+    hud_header = " • ".join(p for p in (artist, title, isrc) if p) or f"Suavecito SoundBoost.AI ({preset.upper()})"
+
+    for f_idx in range(total_frames):
+        t_cur = f_idx / float(fps)
+        center_sample = round(t_cur * sr)
+        win_half = max(512, int(0.045 * sr))
+        s0 = max(0, center_sample - win_half)
+        s1 = min(samples.shape[0], center_sample + win_half)
+        chunk = mono[s0:s1]
+
+        # Compute 18-band FFT magnitude + EQ gain boost
+        if chunk.size >= 64:
+            windowed = chunk * sg.windows.hann(chunk.size)
+            spec = np.abs(np.fft.rfft(windowed))
+            fft_freqs = np.fft.rfftfreq(chunk.size, d=1.0 / float(sr))
+            rms_lvl = float(np.sqrt(np.mean(np.square(chunk)) + 1e-12))
+        else:
+            spec = np.zeros(32, dtype=np.float64)
+            fft_freqs = np.linspace(20.0, 20000.0, 32)
+            rms_lvl = 0.01
+
+        frame = bg_bgr.copy()
+
+        # Reactive pulse ring in upper center
+        pulse_r = int(min(frame_w, frame_h) * (0.12 + 0.18 * min(1.0, rms_lvl * 3.5)))
+        cx, cy = frame_w // 2, int(frame_h * 0.34)
+        cv2.circle(frame, (cx, cy), pulse_r, (235, 180, 56), 2, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (cx, cy), max(8, pulse_r // 2), (180, 92, 255), -1, lineType=cv2.LINE_AA)
+
+        # Draw 18-Band Mastering EQ Spectrum Bars
+        bar_area_w = int(frame_w * 0.84)
+        bar_area_x = int(frame_w * 0.08)
+        bar_base_y = int(frame_h * 0.84)
+        bar_max_h = int(frame_h * 0.22)
+        slot_w = max(4, bar_area_w // 18)
+
+        cv2.rectangle(
+            frame,
+            (bar_area_x - 10, bar_base_y - bar_max_h - 46),
+            (bar_area_x + bar_area_w + 10, bar_base_y + 38),
+            (24, 18, 14),
+            -1,
+        )
+
+        for b_i, f_hz in enumerate(freqs_18):
+            idx_bin = int(np.argmin(np.abs(fft_freqs - f_hz)))
+            mag_db = 20.0 * float(np.log10(max(float(spec[idx_bin]), 1e-6))) + float(eq_gains[b_i])
+            norm = max(0.06, min(1.0, (mag_db + 28.0) / 48.0))
+            bh = int(norm * bar_max_h)
+            bx0 = bar_area_x + b_i * slot_w + 2
+            bx1 = bx0 + max(2, slot_w - 4)
+            by0 = bar_base_y - bh
+            t_col = b_i / 17.0
+            b_ch = int(245 - 45 * t_col)
+            g_ch = int(198 - 105 * t_col)
+            r_ch = int(40 + 205 * t_col)
+            cv2.rectangle(frame, (bx0, by0), (bx1, bar_base_y), (b_ch, g_ch, r_ch), -1)
+
+        # Find active chord & lyric at t_cur
+        cur_chord = ""
+        for c in chords or []:
+            if float(c.get("start_sec", c.get("start", 0.0))) <= t_cur <= float(c.get("end_sec", c.get("end", 999.0))):
+                cur_chord = str(c.get("chord") or c.get("symbol") or "")
+                break
+        cur_lyric = ""
+        for lyr in lyrics or []:
+            l0 = float(lyr.get("start_sec", lyr.get("start", 0.0)))
+            l1 = float(lyr.get("end_sec", lyr.get("end", l0 + 2.5)))
+            if l0 <= t_cur <= l1:
+                cur_lyric = str(lyr.get("text", "")).strip()
+                break
+
+        # Render crisp text HUD via Pillow
+        pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+        draw.text((bar_area_x, bar_base_y - bar_max_h - 34), hud_header, fill=(235, 245, 255))
+        draw.text(
+            (bar_area_x, bar_base_y + 10),
+            f"18-BAND EQ ({preset.upper()})  |  t={t_cur:.2f}s  |  gmem=SuavecitoSoundBoost",
+            fill=(148, 163, 184),
+        )
+        if cur_chord:
+            draw.text((bar_area_x, int(frame_h * 0.10)), f"CHORD: {cur_chord}", fill=(56, 189, 248))
+        if cur_lyric:
+            draw.text((bar_area_x, int(frame_h * 0.54)), f'"{cur_lyric}"', fill=(255, 192, 225))
+
+        writer.write(cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR))
+
+    writer.release()
+
+    # Optional: generate a companion REAPER .RPP project with the rendered MP4 + Mastered WAV on the timeline
+    rpp_summary: dict[str, Any] | None = None
+    if output_rpp_path:
+        rpp_summary = generate_soundboost_rpp_project(
+            output_rpp_path=output_rpp_path,
+            stem_files=[active_audio_file],
+            bpm=bpm,
+            preset=preset,
+            prompt=prompt,
+            eq_18band_db=eq_gains,
+            isrc=isrc,
+            title=title,
+            artist=artist,
+            chords=chords,
+            lyrics=lyrics,
+            video_scenes=[
+                {
+                    "file": str(out_mp4),
+                    "start_sec": 0.0,
+                    "length_sec": round(render_sec, 3),
+                    "name": f"Rendered_{mode_norm}_{out_mp4.name}",
+                }
+            ],
+            video_aspect=aspect_str,
+        )
+
+    return {
+        "output_mp4_path": str(out_mp4),
+        "mp4_size_bytes": out_mp4.stat().st_size if out_mp4.exists() else 0,
+        "mode": mode_norm,
+        "aspect_ratio": aspect_str,
+        "resolution": f"{frame_w}x{frame_h}",
+        "fps": fps,
+        "duration_sec": round(render_sec, 3),
+        "frames_rendered": total_frames,
+        "mastered_wav_path": str(master_wav_path) if master_wav_path else None,
+        "master_audit": master_report.get("post_master_audit") if master_report else None,
+        "reaper_rpp_project": rpp_summary,
+    }
+

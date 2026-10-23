@@ -79,10 +79,12 @@ from soundboost_toolkit.oauth import (
 )
 from soundboost_toolkit.reaper_integration import (
     ReaperLiveBridge,
+    build_reaper_to_shoots_storyboard,
     configure_reaper_ini_bridge,
     generate_soundboost_rpp_project,
-     inspect_reaper_environment,
+    inspect_reaper_environment,
     install_reaper_assets,
+    render_reaper_video_pipeline,
 )
 from soundboost_toolkit.tagging import read_audio_tags, write_audio_tags
 
@@ -1187,8 +1189,15 @@ def install_reaper_jsfx_and_scripts(
     chords: list[dict[str, Any]] | None = None,
     lyrics: list[dict[str, Any]] | None = None,
     reaper_action_id: str | None = None,
+    video_scenes: list[str | dict[str, Any]] | None = None,
+    video_aspect: str = "9:16",
+    output_mp4_path: str | None = None,
+    video_mode: str = "spotify_canvas_9x16",
+    bars_per_scene: int = 4,
+    visual_style_prompt: str = "Cinematic neon nocturnal cyberpunk performance, anamorphic 35mm lens",
+    plan_tier: str = "director",
 ) -> dict[str, Any]:
-    """Deep REAPER 7.82 Integration Suite for Suavecito's SoundBoost.AI Toolkit:
+    """Deep REAPER 7.82 Integration & Video Pipeline Suite for Suavecito's SoundBoost.AI Toolkit:
     - `install` (default): Install `SoundBoost_18Band_Mastering_EQ_Monitor.jsfx` (`options:gmem=SuavecitoSoundBoost`),
       `Suavecito_SoundBoost_Stem_Import.lua`, `Suavecito_Live_Bridge_Daemon.lua` (`__startup.lua` hook),
       `Suavecito_SoundBoost_9x16_Canvas_Visualizer.txt`, 12 Genre `.RfxChain` files, and configure `REAPER.ini`
@@ -1200,7 +1209,10 @@ def install_reaper_jsfx_and_scripts(
     - `send_osc`: Send a binary UDP Open Sound Control packet (`osc_address`, `osc_value`) to REAPER (`127.0.0.1:9000`).
     - `import_stems`: Command live REAPER to import `stems_folder` into hierarchical folder buses (`DRUM KIT BUS`, `VOCAL BUS`, `INSTRUMENT BUS`) with 5-Piece Drum MIDI triggers.
     - `inject_isrc`: Inject `<RENDER_METADATA>` (`ID3:TSRC|<ISRC>;VORBIS:ISRC|<ISRC>`) and DDP markers into the active REAPER project.
-    - `generate_rpp`: Generate a complete REAPER 7.82 `.RPP` multitrack session (`output_rpp_path`) with folder buses, track icons, 5-Piece Drum MIDI triggers, 100ms True-Peak clipping markers, Studio Chords/Lyrics regions, DDP/ISRC metadata, and a 9:16 Video Track.
+    - `generate_rpp`: Generate a complete REAPER 7.82 `.RPP` multitrack session (`output_rpp_path`) with folder buses, track icons, 5-Piece Drum MIDI triggers, 100ms True-Peak clipping markers, Studio Chords/Lyrics regions, DDP/ISRC metadata, and a `<VIDEO_EFFECT "Video processor">` track with `video_scenes`.
+    - `reaper_to_shoots_storyboard`: Analyze `audit_audio_path`, `bpm`, `chords`, and `lyrics` into bar-locked `Shoots` (`h3-max`) storyboard scenes with energy-driven camera motion, credit budget cap, and REAPER scene regions.
+    - `render_video`: Render an audio-reactive `.mp4` (`output_mp4_path`, `video_mode` = `spotify_canvas_9x16` | `social_vertical_9x16` | `music_video_16x9`) with 18-Band Mastering EQ bars, Chords/Lyrics HUD, and optional companion `.RPP` (`output_rpp_path`).
+    - `insert_video_scene`: Insert a video clip or image scene (`audit_audio_path` or first item in `video_scenes`) directly onto the live REAPER Video Track and open the REAPER Video Window.
     - `run_action`: Trigger any native REAPER Action ID or named command (`reaper_action_id`).
     """
     act = action.strip().lower().replace("-", "_")
@@ -1274,9 +1286,47 @@ def install_reaper_jsfx_and_scripts(
             chords=chords,
             lyrics=lyrics,
             audit_audio_path=audit_audio_path,
+            video_scenes=video_scenes,
+            video_aspect=video_aspect,
         )
+    if act in ("reaper_to_shoots_storyboard", "storyboard"):
+        if not audit_audio_path:
+            raise ValueError("audit_audio_path is required for action='reaper_to_shoots_storyboard'")
+        return build_reaper_to_shoots_storyboard(
+            audio_path=audit_audio_path,
+            bpm=bpm,
+            bars_per_scene=bars_per_scene,
+            visual_style_prompt=visual_style_prompt,
+            plan_tier=plan_tier,
+            chords=chords,
+            lyrics=lyrics,
+            aspect_ratio=video_aspect,
+        )
+    if act in ("render_video", "render_reaper_video_pipeline"):
+        if not audit_audio_path or not output_mp4_path:
+            raise ValueError("audit_audio_path and output_mp4_path are required for action='render_video'")
+        return render_reaper_video_pipeline(
+            audio_path=audit_audio_path,
+            output_mp4_path=output_mp4_path,
+            mode=video_mode,
+            preset=preset,
+            prompt=prompt,
+            eq_18band_db=eq_18band_db,
+            title=title,
+            artist=artist,
+            isrc=isrc,
+            chords=chords,
+            lyrics=lyrics,
+            output_rpp_path=output_rpp_path,
+            bpm=bpm,
+        )
+    if act == "insert_video_scene":
+        scene_target = audit_audio_path or (video_scenes[0] if video_scenes else None)
+        if not scene_target or isinstance(scene_target, dict):
+            raise ValueError("Provide a file path in audit_audio_path or video_scenes[0] for action='insert_video_scene'")
+        return bridge.insert_video_scene_to_reaper(scene_target, pos_sec=0.0, open_video_window=True)
     raise ValueError(
-        f"Unsupported REAPER action '{action}'. Valid: install, inspect, configure_bridge, live_status, push_eq, send_osc, import_stems, inject_isrc, generate_rpp, run_action"
+        f"Unsupported REAPER action '{action}'. Valid: install, inspect, configure_bridge, live_status, push_eq, send_osc, import_stems, inject_isrc, generate_rpp, reaper_to_shoots_storyboard, render_video, insert_video_scene, run_action"
     )
 
 
@@ -1516,9 +1566,19 @@ async def soundboost_music_video_and_shoots_director(
     director_message: str | None = None,
     payload: dict[str, Any] | None = None,
     page: int = 1,
+    audio_path: str | None = None,
+    output_mp4_path: str | None = None,
+    output_rpp_path: str | None = None,
+    bpm: float = 120.0,
+    bars_per_scene: int = 4,
+    aspect_ratio: str = "9:16",
+    preset: str = "pop",
+    plan_tier: str = "director",
 ) -> Any:
-    """Orchestrate AI Music Videos (`h3-max`), `Shoots` storyboard scenes, Director Chat, Spotify 9:16 Canvas clips, and `shoots.soundboost.ai` SSO:
+    """Orchestrate AI Music Videos (`h3-max`), `Shoots` storyboard scenes, Director Chat, Spotify 9:16 Canvas clips, `shoots.soundboost.ai` SSO, and the **Bidirectional REAPER <-> Video Pipeline**:
     - `shoots_sso_url`: Build cross-domain SSO URL (`https://mastering.soundboost.ai/sso?provider=google&appName=shoots&gacTkn=...`) and exchange SSO token
+    - `reaper_to_shoots_storyboard`: Analyze local `audio_path` + `bpm` into bar-locked `Shoots` (`h3-max`) storyboard scenes, camera motion cues, credit spending cap, and REAPER timeline regions
+    - `render_reaper_video_pipeline`: Render an audio-reactive `.mp4` (`output_mp4_path`, `9:16` Spotify Canvas / Shorts or `16:9` MV) with 18-Band Mastering EQ HUD, mastered 24-bit WAV companion, and optional `.RPP` project (`output_rpp_path`)
     - `list_music_videos`: List AI Music Video (`h3-max`) projects (`GET /api/music-videos/`)
     - `create_music_video`: Create AI Music Video project (`POST /api/music-videos/`)
     - `get_music_video`: Fetch AI Music Video project details (`GET /api/music-videos/{id}/`)
@@ -1535,6 +1595,33 @@ async def soundboost_music_video_and_shoots_director(
     """
     client = SoundBoostClient()
     act = action.strip().lower()
+    if act in ("reaper_to_shoots_storyboard", "storyboard"):
+        if not audio_path:
+            raise ValueError("audio_path is required for action='reaper_to_shoots_storyboard'")
+        return await asyncio.to_thread(
+            build_reaper_to_shoots_storyboard,
+            audio_path,
+            bpm=bpm,
+            bars_per_scene=bars_per_scene,
+            visual_style_prompt=director_message
+            or "Cinematic neon nocturnal cyberpunk performance, anamorphic 35mm lens",
+            plan_tier=plan_tier,
+            aspect_ratio=aspect_ratio,
+        )
+    if act in ("render_reaper_video_pipeline", "render_video"):
+        if not audio_path or not output_mp4_path:
+            raise ValueError("audio_path and output_mp4_path are required for action='render_reaper_video_pipeline'")
+        mode_str = "music_video_16x9" if "16:9" in aspect_ratio or "16x9" in aspect_ratio else "spotify_canvas_9x16"
+        return await asyncio.to_thread(
+            render_reaper_video_pipeline,
+            audio_path=audio_path,
+            output_mp4_path=output_mp4_path,
+            mode=mode_str,
+            preset=preset,
+            prompt=director_message,
+            output_rpp_path=output_rpp_path,
+            bpm=bpm,
+        )
     if act == "shoots_sso_url":
         return {
             "shoots_google_sso_url": client.build_shoots_google_sso_url(),

@@ -251,6 +251,48 @@ local function handle_inbox_command(raw)
       end
     end
 
+  elseif cmd == "insert_video_item" then
+    local video_path = extract_json_string(raw, "video_path") or ""
+    local pos_sec = extract_json_number(raw, "pos_sec") or 0.0
+    local open_vwnd = extract_json_number(raw, "open_video_window") or 0
+    if video_path ~= "" then
+      local v_tr = nil
+      local cnt = r.CountTracks(0)
+      for i = 0, cnt - 1 do
+        local tr = r.GetTrack(0, i)
+        local _, tname = r.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
+        if tname:upper():find("VIDEO", 1, true) or tname:upper():find("SHOOTS", 1, true) then
+          v_tr = tr
+          break
+        end
+      end
+      if not v_tr then
+        r.InsertTrackAtIndex(cnt, true)
+        v_tr = r.GetTrack(0, cnt)
+        if v_tr then
+          r.GetSetMediaTrackInfo_String(v_tr, "P_NAME", "SHOOTS / 9:16 SPOTIFY CANVAS VIDEO (h3-max gmem)", true)
+          r.GetSetMediaTrackInfo_String(v_tr, "P_ICON", "video.png", true)
+          r.SetTrackColor(v_tr, r.ColorToNative(236, 72, 153) | 0x1000000)
+          r.TrackFX_AddByName(v_tr, "Video processor", false, 1)
+        end
+      end
+      if v_tr then
+        r.SetOnlyTrackSelected(v_tr)
+        r.SetEditCurPos(pos_sec, false, false)
+        r.InsertMedia(video_path, 0)
+        local master_tr = r.GetMasterTrack(0)
+        if master_tr then
+          r.TrackFX_AddByName(master_tr, "SoundBoost_18Band_Mastering_EQ_Monitor.jsfx", false, 1)
+          r.TrackFX_AddByName(master_tr, "JS: misc/video_sample_peeker", false, 1)
+        end
+        if open_vwnd == 1 then
+          r.Main_OnCommand(50125, 0) -- View: Toggle video window
+        end
+        r.UpdateArrange()
+        detail_msg = "inserted_video_item_" .. video_path
+      end
+    end
+
   elseif cmd == "run_action" then
     local action_id = extract_json_string(raw, "action_id") or ""
     if action_id ~= "" then

@@ -40,10 +40,12 @@ from soundboost_toolkit.oauth import (
 )
 from soundboost_toolkit.reaper_integration import (
     ReaperLiveBridge,
+    build_reaper_to_shoots_storyboard,
     configure_reaper_ini_bridge,
     generate_soundboost_rpp_project,
     inspect_reaper_environment,
     install_reaper_assets,
+    render_reaper_video_pipeline,
 )
 from soundboost_toolkit.tagging import read_audio_tags, write_audio_tags
 
@@ -362,11 +364,11 @@ def cmd_reaper_install(
 def cmd_reaper(
     action: str = typer.Argument(
         "inspect",
-        help="inspect | install | status | push-eq | osc | import-stems | generate-rpp | inject-isrc | action",
+        help="inspect | install | status | push-eq | osc | import-stems | generate-rpp | storyboard | render-video | insert-video | inject-isrc | action",
     ),
     reaper_dir: str | None = typer.Option(None, "--reaper-dir", help="Custom REAPER resource path"),
     preset: str = typer.Option("pop", "--preset", "-p", help="SoundBoost Mastering genre preset"),
-    prompt: str | None = typer.Option(None, "--prompt", help="Natural-language 18-band EQ prompt"),
+    prompt: str | None = typer.Option(None, "--prompt", help="Natural-language 18-band EQ or visual style prompt"),
     width: float = typer.Option(100.0, "--width", help="Mid/Side Stereo Width % (0..200)"),
     drive: float = typer.Option(0.0, "--drive", help="Limiter Makeup Drive dB"),
     ceiling: float = typer.Option(-1.0, "--ceiling", help="Brickwall Ceiling dBTP"),
@@ -374,15 +376,18 @@ def cmd_reaper(
     osc_val: float | None = typer.Option(None, "--osc-val", help="OSC numeric argument"),
     stems_folder: str | None = typer.Option(None, "--stems-dir", help="Folder of separated stems"),
     rpp_out: str | None = typer.Option(None, "--rpp", "-o", help="Output .RPP project file path"),
-    audit_file: str | None = typer.Option(None, "--audit-file", help="Audio file to audit for 100ms True-Peak clipping markers"),
+    mp4_out: str | None = typer.Option(None, "--mp4", help="Output .MP4 video file path for render-video"),
+    video_mode: str = typer.Option("spotify_canvas_9x16", "--video-mode", help="spotify_canvas_9x16 | social_vertical_9x16 | music_video_16x9"),
+    audit_file: str | None = typer.Option(None, "--audit-file", help="Audio or video file path for audit, storyboard, render-video, or insert-video"),
     bpm: float = typer.Option(120.0, "--bpm", help="Project tempo in BPM"),
+    bars_per_scene: int = typer.Option(4, "--bars", help="Bars per scene for Shoots storyboard"),
     isrc: str | None = typer.Option(None, "--isrc", help="ISRC code for <RENDER_METADATA> and DDP INDEX1"),
     title: str | None = typer.Option(None, "--title", help="Track title"),
     artist: str | None = typer.Option(None, "--artist", help="Artist / Performer name"),
     album: str | None = typer.Option(None, "--album", help="Album title"),
     action_id: str | None = typer.Option(None, "--action-id", help="REAPER Action ID or command name"),
 ) -> None:
-    """Deep REAPER 7.82 integration controller (JSFX `gmem`, HTTP/OSC/IPC Live Bridge & `.RPP` Multitrack Generator)."""
+    """Deep REAPER 7.82 integration & video pipeline controller (JSFX `gmem`, HTTP/OSC/IPC Live Bridge, `Shoots` Storyboard, `.MP4` Renderer & `.RPP` Generator)."""
     act = action.strip().lower().replace("_", "-")
     if act == "inspect":
         console.print_json(data=inspect_reaper_environment(reaper_dir))
@@ -463,6 +468,38 @@ def cmd_reaper(
         if not action_id:
             raise typer.BadParameter("--action-id is required for action")
         console.print_json(data=bridge.dispatch_ipc_command("run_action", {"action_id": action_id}))
+    elif act == "storyboard":
+        if not audit_file:
+            raise typer.BadParameter("--audit-file (audio path) is required for storyboard")
+        console.print_json(
+            data=build_reaper_to_shoots_storyboard(
+                audio_path=audit_file,
+                bpm=bpm,
+                bars_per_scene=bars_per_scene,
+                visual_style_prompt=prompt or "Cinematic neon nocturnal cyberpunk performance, anamorphic 35mm lens",
+            )
+        )
+    elif act == "render-video":
+        if not audit_file or not mp4_out:
+            raise typer.BadParameter("--audit-file and --mp4 are required for render-video")
+        console.print_json(
+            data=render_reaper_video_pipeline(
+                audio_path=audit_file,
+                output_mp4_path=mp4_out,
+                mode=video_mode,
+                preset=preset,
+                prompt=prompt,
+                title=title,
+                artist=artist,
+                isrc=isrc,
+                output_rpp_path=rpp_out,
+                bpm=bpm,
+            )
+        )
+    elif act == "insert-video":
+        if not audit_file:
+            raise typer.BadParameter("--audit-file (video/image path) is required for insert-video")
+        console.print_json(data=bridge.insert_video_scene_to_reaper(audit_file))
     else:
         raise typer.BadParameter(f"Unknown reaper action '{action}'")
 
