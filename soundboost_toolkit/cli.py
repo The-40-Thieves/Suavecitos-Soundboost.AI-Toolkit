@@ -1,0 +1,330 @@
+"""Rich Typer CLI for Suavecito's Soundboost.AI Toolkit (`soundboost`)."""
+
+from __future__ import annotations
+
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from soundboost_toolkit.client import SoundBoostClient
+from soundboost_toolkit.constants import (
+    MASTERING_GENRE_PRESETS,
+    MV_CHARACTER_REF_CAPS,
+    STEM_PROFILES,
+)
+from soundboost_toolkit.crypto import (
+    build_ui_security_headers,
+    compute_mv_spending_limit,
+    decrypt_cookie_value,
+    decrypt_param_id,
+    encrypt_param_id,
+    verify_param_cipher_kat,
+)
+from soundboost_toolkit.dsp import (
+    analyze_audio_file,
+    classify_pitch_shift_zone,
+    quantize_loop_to_bar_beat_sixteenth,
+    render_18band_master,
+    transpose_chord_symbol,
+)
+from soundboost_toolkit.mcp_server import list_soundboost_platform_capabilities
+from soundboost_toolkit.reaper_integration import install_reaper_assets
+from soundboost_toolkit.tagging import read_audio_tags, write_audio_tags
+
+app = typer.Typer(
+    name="soundboost",
+    help="Suavecito's Soundboost.AI Toolkit — CLI, FastMCP Server, Local BS.1770-4 DSP & REAPER Suite.",
+    no_args_is_help=True,
+)
+console = Console()
+
+
+@app.command("audit")
+def cmd_audit(
+    file_path: str = typer.Argument(..., help="Path to local WAV, FLAC, AIFF, or MP3 file"),
+    as_json: bool = typer.Option(False, "--json", help="Emit raw JSON output"),
+) -> None:
+    """Run ITU-R BS.1770-4 Loudness, LRA, 100ms True-Peak, Mix Doctor & DistroKid Release Audit."""
+    res = analyze_audio_file(file_path)
+    if as_json:
+        console.print_json(data=res.to_dict())
+        return
+
+    metrics = Table(title=f"ITU-R BS.1770-4 & Mix Doctor Audit — {res.file_path}", show_header=True)
+    metrics.add_column("Metric", style="bold cyan")
+    metrics.add_column("Value", style="white")
+    metrics.add_row("Format / Sample Rate", f"{res.bit_depth_subtype} @ {res.sample_rate} Hz ({res.channels} ch)")
+    metrics.add_row("Duration", f"{res.duration_sec:.2f} s")
+    metrics.add_row("Integrated Loudness", f"{res.integrated_lufs:.2f} LUFS")
+    metrics.add_row("Short-Term Max (3s)", f"{res.short_term_max_lufs:.2f} LUFS")
+    metrics.add_row("Momentary Max (400ms)", f"{res.momentary_max_lufs:.2f} LUFS")
+    metrics.add_row("Loudness Range (LRA P95-P10)", f"{res.loudness_range_lu:.2f} LU")
+    metrics.add_row("Sample Peak", f"{res.sample_peak_dbfs:.2f} dBFS")
+    metrics.add_row(
+        "4x True Peak (100ms Binary Search)",
+        f"{res.true_peak_dbtp:.2f} dBTP @ {res.true_peak_time_sec:.2f} s",
+    )
+    metrics.add_row("Crest Factor", f"{res.crest_factor_db:.2f} dB")
+    metrics.add_row("Stereo Phase Correlation", f"{res.stereo_correlation:.3f} (M/S: {res.mid_side_ratio_db:.2f} dB)")
+    metrics.add_row("Estimated High-Freq Bandwidth", f"{res.estimated_bandwidth_hz:.0f} Hz")
+    metrics.add_row(
+        "DistroKid Release Ready",
+        "[bold green]YES[/bold green]" if res.distrokid_ready else "[bold yellow]NEEDS MASTERING[/bold yellow]",
+    )
+    console.print(metrics)
+
+    pen_table = Table(title="Streaming Loudness Penalty Matrix", show_header=True)
+    pen_table.add_column("Platform", style="cyan")
+    pen_table.add_column("Target LUFS", justify="right")
+    pen_table.add_column("Ceiling dBTP", justify="right")
+    pen_table.add_column("Gain Change", justify="right")
+    pen_table.add_column("Peak Status", justify="center")
+    for p in res.streaming_penalties.values():
+        delta = p["gain_change_db"]
+        delta_str = f"{delta:+.2f} dB"
+        clip_str = "[red]EXCEEDS CEILING[/red]" if p["true_peak_exceeds_ceiling"] else "[green]OK[/green]"
+        pen_table.add_row(
+            str(p["platform"]),
+            f"{p['target_lufs']:.1f}",
+            f"{p['ceiling_dbtp']:.1f}",
+            delta_str,
+            clip_str,
+        )
+    console.print(pen_table)
+
+    rec_text = "\n".join(f"• {r}" for r in res.mix_doctor_recommendations)
+    console.print(Panel(rec_text, title="Mix Doctor Recommendations", border_style="blue"))
+
+
+@app.command("master-local")
+def cmd_master_local(
+    input_path: str = typer.Argument(..., help="Input audio file path"),
+    output_path: str = typer.Argument(..., help="Output mastered WAV file path"),
+    preset: str = typer.Option("pop", "--preset", "-p", help=f"Genre preset ({', '.join(MASTERING_GENRE_PRESETS)})"),
+    eq_csv: str | None = typer.Option(None, "--eq", help="18 comma-separated dB values (-6.0 to +6.0) for 20Hz..15kHz"),
+    width: float = typer.Option(100.0, "--width", "-w", help="Mid/Side stereo width % (0-200)"),
+    target_lufs: float = typer.Option(-14.0, "--lufs", "-l", help="Target Integrated LUFS"),
+    ceiling: float = typer.Option(-1.0, "--ceiling", "-c", help="True-Peak brickwall ceiling in dBTP"),
+    bit_depth: int = typer.Option(24, "--bits", "-b", help="Output WAV bit depth (16, 24, or 32)"),
+    dither: bool = typer.Option(True, "--dither/--no-dither", help="Apply TPDF dithering"),
+) -> None:
+    """Render a local studio master using SoundBoost's 18-Band Graphic EQ, M/S Width, LUFS Gain & True-Peak Limiter."""
+    eq_list: list[float] | None = None
+    if eq_csv:
+        eq_list = [float(x.strip()) for x in eq_csv.split(",") if x.strip()]
+    result = render_18band_master(
+        input_path=input_path,
+        output_path=output_path,
+        eq_gains_db=eq_list,
+        preset=None if eq_list else preset,
+        stereo_width_pct=width,
+        target_lufs=target_lufs,
+        true_peak_ceiling_dbtp=ceiling,
+        bit_depth=bit_depth,
+        apply_tpdf_dither=dither,
+    )
+    console.print_json(data=result)
+
+
+@app.command("tags")
+def cmd_tags(
+    file_path: str = typer.Argument(..., help="Path to MP3, FLAC, or WAV file"),
+    title: str | None = typer.Option(None, "--title", help="Track title (TIT2)"),
+    artist: str | None = typer.Option(None, "--artist", help="Primary artist (TPE1)"),
+    album: str | None = typer.Option(None, "--album", help="Album title (TALB)"),
+    year: str | None = typer.Option(None, "--year", help="Release year (TYER)"),
+    track: str | None = typer.Option(None, "--track", help="Track number (TRCK)"),
+    genre: str | None = typer.Option(None, "--genre", help="Genre (TCON)"),
+    bpm: str | None = typer.Option(None, "--bpm", help="Tempo BPM (TBPM)"),
+    key: str | None = typer.Option(None, "--key", help="Initial musical key (TKEY)"),
+    publisher: str | None = typer.Option(None, "--publisher", help="Record Label / Publisher (TPUB)"),
+    isrc: str | None = typer.Option(None, "--isrc", help="12-character ISO 3901 ISRC code (TSRC)"),
+    comment: str | None = typer.Option(None, "--comment", help="Comment (COMM)"),
+    lyrics: str | None = typer.Option(None, "--lyrics", help="Unsynchronized lyrics (USLT)"),
+    cover: str | None = typer.Option(None, "--cover", help="Path to 3000x3000 JPG/PNG cover art (APIC)"),
+) -> None:
+    """Read or write ID3v2.3 / FLAC / WAV release metadata, 12-char ISRC (`TSRC`), and cover artwork."""
+    any_write = any(
+        v is not None
+        for v in (title, artist, album, year, track, genre, bpm, key, publisher, isrc, comment, lyrics, cover)
+    )
+    if any_write:
+        out = write_audio_tags(
+            file_path=file_path,
+            title=title,
+            artist=artist,
+            album=album,
+            year=year,
+            track=track,
+            genre=genre,
+            bpm=bpm,
+            initial_key=key,
+            publisher=publisher,
+            isrc=isrc,
+            comment=comment,
+            lyrics=lyrics,
+            cover_art_path=cover,
+        )
+    else:
+        out = read_audio_tags(file_path)
+    console.print_json(data=out)
+
+
+@app.command("cipher")
+def cmd_cipher(
+    track_id: int | None = typer.Option(None, "--encrypt-track", "-e", help="Encrypt integer track ID to `?track=` hash"),
+    track_hash: str | None = typer.Option(None, "--decrypt-track", "-d", help="Decrypt `?track=` hash back to integer ID"),
+    cookie_da: str | None = typer.Option(None, "--decrypt-cookie", help="Decrypt SoundBoost `_d_a` cookie"),
+    ui_headers: bool = typer.Option(False, "--ui-headers", help="Generate live `ui-api-key` and `ui-token` headers"),
+) -> None:
+    """Run SoundBoost AES-CBC cipher operations and Studio Known-Answer Self-Test (KAT)."""
+    out: dict[str, object] = {"kat_self_test_passed": verify_param_cipher_kat()}
+    client = SoundBoostClient()
+    if track_id is not None:
+        out["encrypted_track_hash"] = encrypt_param_id(track_id)
+        out["studio_deep_link"] = client.build_studio_url(track_id)
+    if track_hash is not None:
+        out["decrypted_track_id"] = decrypt_param_id(track_hash)
+    if cookie_da is not None:
+        out["decrypted_cookie"] = decrypt_cookie_value(cookie_da)
+    if ui_headers:
+        out["ui_headers"] = build_ui_security_headers()
+    console.print_json(data=out)
+
+
+@app.command("grid")
+def cmd_grid(
+    chords_csv: str = typer.Option("Cm,Abmaj7,Eb,Bb/D", "--chords", "-c", help="Comma-separated chord progression"),
+    semitones: int = typer.Option(0, "--semitones", "-s", help="Semitone shift (-12 to +12)"),
+    flats: bool = typer.Option(False, "--flats", help="Prefer flat enharmonic spelling"),
+    bpm: float = typer.Option(120.0, "--bpm", help="Tempo in BPM"),
+    loop_start: float = typer.Option(0.0, "--start", help="Loop start in seconds"),
+    loop_end: float = typer.Option(8.0, "--end", help="Loop end in seconds"),
+) -> None:
+    """Transpose chords, classify Pitch Shift zone (`Natural` vs `Creative`), and quantize loops to `Bar.Beat.1/16`."""
+    chords = [c.strip() for c in chords_csv.split(",") if c.strip()]
+    out = {
+        "pitch_shift": classify_pitch_shift_zone(semitones),
+        "chords": [
+            {"original": c, "transposed": transpose_chord_symbol(c, semitones, prefer_flats=flats)}
+            for c in chords
+        ],
+        "loop_grid": quantize_loop_to_bar_beat_sixteenth(loop_start, loop_end, bpm),
+    }
+    console.print_json(data=out)
+
+
+@app.command("studio")
+def cmd_studio(
+    action: str = typer.Argument(
+        ...,
+        help="Action: status | start-stems | get-stems | voice-clean | start-drums | get-drums | start-chords | get-chords | start-lyrics | get-lyrics | handoff",
+    ),
+    original_id: str = typer.Argument(..., help="Studio original track ID"),
+    profile: str = typer.Option("standard_4stem", "--profile", "-p", help=f"Stem profile ({', '.join(STEM_PROFILES)})"),
+    source: str = typer.Option("mix", "--source", help="Handoff source: loop | stems | mix"),
+) -> None:
+    """Control `studio.soundboost.ai` Stem Separation, 5-Piece Drum Kit Splitter, Voice Cleaner, Chords & Lyrics."""
+    client = SoundBoostClient()
+    act = action.strip().lower().replace("_", "-")
+    if act == "status":
+        res = client.get_studio_original_status(original_id)
+    elif act == "start-stems":
+        res = client.start_studio_stem_split(original_id, profile_key=profile)
+    elif act == "get-stems":
+        res = client.get_studio_stems(original_id)
+    elif act == "voice-clean":
+        res = client.start_studio_voice_clean(original_id)
+    elif act == "start-drums":
+        res = client.start_studio_drum_split(original_id)
+    elif act == "get-drums":
+        res = client.get_studio_drum_stems(original_id)
+    elif act == "start-chords":
+        res = client.start_studio_chord_analysis(original_id)
+    elif act == "get-chords":
+        res = client.get_studio_chord_analysis(original_id)
+    elif act == "start-lyrics":
+        res = client.start_studio_lyrics(original_id)
+    elif act == "get-lyrics":
+        res = client.get_studio_lyrics(original_id)
+    elif act == "handoff":
+        res = client.handoff_studio_to_mastering(original_id, source_type=source)
+    else:
+        raise typer.BadParameter(f"Unknown studio action '{action}'")
+    console.print_json(data=res)
+
+
+@app.command("converta")
+def cmd_converta(
+    action: str = typer.Argument("formats", help="formats | convert | status"),
+    source: str | None = typer.Option(None, "--source", "-s", help="Upload ID or source audio URL"),
+    job_id: str | None = typer.Option(None, "--job", "-j", help="Converta job ID for status check"),
+    fmt: str = typer.Option("wav", "--format", "-f", help="Output format: wav | aiff | flac | ogg | aac | m4a | mp3"),
+    bits: int = typer.Option(24, "--bits", "-b", help="Bit depth: 16 | 24 | 32"),
+    rate: int = typer.Option(48000, "--rate", "-r", help="Sample rate: 44100 | 48000"),
+    dither: bool = typer.Option(True, "--dither/--no-dither", help="Enable dithering on lossless formats"),
+) -> None:
+    """Query `converta.soundboost.ai` supported formats or run hi-res audio format conversions."""
+    client = SoundBoostClient()
+    act = action.strip().lower()
+    if act == "formats":
+        console.print_json(data=client.get_converta_formats())
+    elif act == "convert":
+        if not source:
+            raise typer.BadParameter("--source is required for convert")
+        console.print_json(
+            data=client.start_converta_conversion(
+                upload_id_or_url=source,
+                output_format=fmt,
+                bit_depth=bits,
+                sample_rate=rate,
+                dithering=dither,
+            )
+        )
+    elif act == "status":
+        if not job_id:
+            raise typer.BadParameter("--job is required for status")
+        console.print_json(data=client.get_converta_status(job_id))
+    else:
+        raise typer.BadParameter(f"Unknown converta action '{action}'")
+
+
+@app.command("mv-budget")
+def cmd_mv_budget(
+    credits: int = typer.Argument(..., help="Quoted storyboard credits"),
+    tier: str = typer.Option("director", "--tier", "-t", help="Plan tier: starter | creator | director | studio"),
+) -> None:
+    """Compute AI Music Video (`h3-max`) retake spending limit (`ec(quote)` formula) and tier capabilities."""
+    t_norm = tier.strip().lower()
+    cap = compute_mv_spending_limit(credits)
+    console.print_json(
+        data={
+            "engine": "h3-max",
+            "plan_tier": t_norm,
+            "quoted_credits": credits,
+            "spending_limit_credits": cap,
+            "retake_headroom_credits": cap - credits,
+            "character_reference_cap": MV_CHARACTER_REF_CAPS.get(t_norm, 1),
+            "auto_qc_enabled": t_norm in ("director", "studio"),
+            "deep_research_enabled": t_norm == "studio",
+        }
+    )
+
+
+@app.command("reaper-install")
+def cmd_reaper_install(
+    reaper_dir: str | None = typer.Option(None, "--reaper-dir", help="Custom REAPER resource path"),
+) -> None:
+    """Install the Suavecito SoundBoost 18-Band Mastering EQ JSFX plugin and Stem Importer ReaScript into REAPER."""
+    console.print_json(data=install_reaper_assets(reaper_dir))
+
+
+@app.command("specs")
+def cmd_specs() -> None:
+    """Print the full SoundBoost.ai platform capability matrix (18-band EQ, stems, drums, Converta, LUFS targets)."""
+    console.print_json(data=list_soundboost_platform_capabilities())
+
+
+if __name__ == "__main__":
+    app()

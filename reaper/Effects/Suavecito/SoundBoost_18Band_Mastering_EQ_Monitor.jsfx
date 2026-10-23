@@ -1,0 +1,161 @@
+desc:Suavecito's SoundBoost.AI 18-Band Mastering EQ, M/S Width & Ceiling Limiter
+//tags: equalizer mastering limiter stereo mid-side suavecito soundboost
+//author: Suavecito (The 40 Thieves)
+
+slider1:0<-6,6,0.1>Band 1: 20 Hz (Sub) [dB]
+slider2:0<-6,6,0.1>Band 2: 30 Hz (Sub) [dB]
+slider3:0<-6,6,0.1>Band 3: 45 Hz (Sub/Punch) [dB]
+slider4:0<-6,6,0.1>Band 4: 70 Hz (Bass) [dB]
+slider5:0<-6,6,0.1>Band 5: 100 Hz (Warmth) [dB]
+slider6:0<-6,6,0.1>Band 6: 140 Hz (Upper Bass) [dB]
+slider7:0<-6,6,0.1>Band 7: 200 Hz (Mud/Body) [dB]
+slider8:0<-6,6,0.1>Band 8: 315 Hz (Low Mid) [dB]
+slider9:0<-6,6,0.1>Band 9: 500 Hz (Boxiness) [dB]
+slider10:0<-6,6,0.1>Band 10: 700 Hz (Mid) [dB]
+slider11:0<-6,6,0.1>Band 11: 1000 Hz (Center Mid) [dB]
+slider12:0<-6,6,0.1>Band 12: 1400 Hz (Vocal Forward) [dB]
+slider13:0<-6,6,0.1>Band 13: 2000 Hz (Presence) [dB]
+slider14:0<-6,6,0.1>Band 14: 3150 Hz (Bite/Clarity) [dB]
+slider15:0<-6,6,0.1>Band 15: 5000 Hz (Definition) [dB]
+slider16:0<-6,6,0.1>Band 16: 7000 Hz (Sibilance/Edge) [dB]
+slider17:0<-6,6,0.1>Band 17: 10000 Hz (Air) [dB]
+slider18:0<-6,6,0.1>Band 18: 15000 Hz (Brilliance) [dB]
+slider19:100<0,200,1>Mid/Side Stereo Width [%]
+slider20:0<-12,12,0.1>Makeup / Drive Gain [dB]
+slider21:-1.0<-3.0,0.0,0.1>Brickwall Ceiling [dBTP]
+
+@init
+freqs = 0;
+freqs[0] = 20;   freqs[1] = 30;   freqs[2] = 45;   freqs[3] = 70;
+freqs[4] = 100;  freqs[5] = 140;  freqs[6] = 200;  freqs[7] = 315;
+freqs[8] = 500;  freqs[9] = 700;  freqs[10] = 1000; freqs[11] = 1400;
+freqs[12] = 2000; freqs[13] = 3150; freqs[14] = 5000; freqs[15] = 7000;
+freqs[16] = 10000; freqs[17] = 15000;
+
+gains = 32;
+coeffs = 64;   // 5 coeffs per band (b0, b1, b2, a1, a2) -> 90 slots
+states_l = 200; // 4 state vars per band -> 72 slots
+states_r = 300;
+peak_hold_db = -90;
+gr_meter_db = 0;
+
+function update_biquad(idx, freq, gain_db) local(A, w0, alpha, cosw0, b0, b1, b2, a0, a1, a2, base) (
+  base = coeffs + idx * 5;
+  abs(gain_db) < 0.001 || freq >= srate * 0.49 ? (
+    base[0] = 1.0; base[1] = 0.0; base[2] = 0.0; base[3] = 0.0; base[4] = 0.0;
+  ) : (
+    A = 10 ^ (gain_db / 40.0);
+    w0 = 2.0 * $pi * freq / srate;
+    alpha = sin(w0) / (2.0 * 2.2);
+    cosw0 = cos(w0);
+    b0 = 1.0 + alpha * A;
+    b1 = -2.0 * cosw0;
+    b2 = 1.0 - alpha * A;
+    a0 = 1.0 + alpha / A;
+    a1 = -2.0 * cosw0;
+    a2 = 1.0 - alpha / A;
+    base[0] = b0 / a0;
+    base[1] = b1 / a0;
+    base[2] = b2 / a0;
+    base[3] = a1 / a0;
+    base[4] = a2 / a0;
+  );
+);
+
+@slider
+gains[0] = slider1;  gains[1] = slider2;  gains[2] = slider3;  gains[3] = slider4;
+gains[4] = slider5;  gains[5] = slider6;  gains[6] = slider7;  gains[7] = slider8;
+gains[8] = slider9;  gains[9] = slider10; gains[10] = slider11; gains[11] = slider12;
+gains[12] = slider13; gains[13] = slider14; gains[14] = slider15; gains[15] = slider16;
+gains[16] = slider17; gains[17] = slider18;
+
+i = 0;
+loop(18,
+  update_biquad(i, freqs[i], gains[i]);
+  i += 1;
+);
+
+width_factor = slider19 / 100.0;
+drive_lin = 10 ^ (slider20 / 20.0);
+ceiling_lin = 10 ^ (slider21 / 20.0);
+
+@sample
+xl = spl0;
+xr = spl1;
+
+i = 0;
+loop(18,
+  c = coeffs + i * 5;
+  sl = states_l + i * 4;
+  sr = states_r + i * 4;
+
+  yl = c[0]*xl + c[1]*sl[0] + c[2]*sl[1] - c[3]*sl[2] - c[4]*sl[3];
+  sl[1] = sl[0]; sl[0] = xl; sl[3] = sl[2]; sl[2] = yl;
+  xl = yl;
+
+  yr = c[0]*xr + c[1]*sr[0] + c[2]*sr[1] - c[3]*sr[2] - c[4]*sr[3];
+  sr[1] = sr[0]; sr[0] = xr; sr[3] = sr[2]; sr[2] = yr;
+  xr = yr;
+
+  i += 1;
+);
+
+// Mid/Side Stereo Width
+mid = 0.5 * (xl + xr);
+side = 0.5 * (xl - xr) * width_factor;
+xl = (mid + side) * drive_lin;
+xr = (mid - side) * drive_lin;
+
+// Brickwall Ceiling Limiter
+abs_max = max(abs(xl), abs(xr));
+abs_max > ceiling_lin ? (
+  gr = ceiling_lin / abs_max;
+  xl *= gr;
+  xr *= gr;
+  gr_meter_db = 20.0 * log10(gr);
+) : (
+  gr_meter_db *= 0.9995;
+);
+
+out_max = max(abs(xl), abs(xr));
+out_db = out_max > 0.000001 ? 20.0 * log10(out_max) : -90.0;
+out_db > peak_hold_db ? peak_hold_db = out_db : peak_hold_db = peak_hold_db * 0.9998 + out_db * 0.0002;
+
+spl0 = xl;
+spl1 = xr;
+
+@gfx 680 240
+gfx_r = 0.07; gfx_g = 0.08; gfx_b = 0.11; gfx_a = 1.0;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// Zero-dB center line
+mid_y = gfx_h * 0.5;
+gfx_r = 0.25; gfx_g = 0.28; gfx_b = 0.35;
+gfx_line(30, mid_y, gfx_w - 30, mid_y);
+
+// Draw 18-band bars
+bar_w = (gfx_w - 80) / 18;
+i = 0;
+loop(18,
+  g_db = gains[i];
+  bx = 40 + i * bar_w;
+  bh = (g_db / 6.0) * (gfx_h * 0.36);
+  g_db >= 0 ? (
+    gfx_r = 0.15; gfx_g = 0.65; gfx_b = 0.98;
+    gfx_rect(bx + 2, mid_y - bh, bar_w - 6, bh);
+  ) : (
+    gfx_r = 0.95; gfx_g = 0.42; gfx_b = 0.25;
+    gfx_rect(bx + 2, mid_y, bar_w - 6, -bh);
+  );
+  i += 1;
+);
+
+gfx_r = 0.92; gfx_g = 0.95; gfx_b = 1.0;
+gfx_x = 12; gfx_y = 10;
+gfx_drawstr("Suavecito's SoundBoost.AI 18-Band Mastering EQ  |  Width: ");
+gfx_drawnumber(slider19, 0);
+gfx_drawstr("%  |  Ceiling: ");
+gfx_drawnumber(slider21, 1);
+gfx_drawstr(" dBTP  |  Peak: ");
+gfx_drawnumber(peak_hold_db, 1);
+gfx_drawstr(" dBFS");
