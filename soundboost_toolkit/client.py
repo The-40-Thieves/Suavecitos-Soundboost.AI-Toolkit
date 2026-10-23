@@ -4,7 +4,7 @@ Covers all 4 microservices:
 1. `https://api.soundboost.ai` — Mastering, Mix Doctor, Audio Enhancer, Studio Stems,
    5-Piece Drum Kit Splitter, Voice Cleaner, Chord Recognition, Word-Synced Lyrics,
    Smart Links (`soundboo.st`), Text-to-Audio, and SSO/Billing.
-2. `https://mastering.soundboost.ai` — Suite Token Server, Static Param Decryptor,
+2. `https://mastering.soundboost.ai` — AI Mastering Prompt Assistant, Voice Mastering,
    AI Music Video (`h3-max`), and Billing/User verification.
 3. `https://converta.soundboost.ai` — Hi-Res Audio Format Converter (`wav/aiff/flac/ogg/aac/m4a/mp3`,
    `16/24/32-bit`, `44.1/48 kHz`, dithering) and Studio Stem/Loop Segment Exporter.
@@ -30,12 +30,6 @@ from soundboost_toolkit.constants import (
     STEM_PROFILES,
     STUDIO_URL,
 )
-from soundboost_toolkit.crypto import (
-    build_ui_security_headers,
-    decrypt_cookie_value,
-    decrypt_param_id,
-    encrypt_param_id,
-)
 from soundboost_toolkit.oauth import load_token_from_vault, save_credentials_to_vault
 
 DEFAULT_TIMEOUT_SEC = 60.0
@@ -49,7 +43,6 @@ _PUBLIC_FREE_PATH_PREFIXES: tuple[str, ...] = (
     "/api/user/verify-email/",
     "/api/products/",
     "/api/health/",
-    "/api/decrypt-param-static",
     "/api/v1/formats",
     "/api/v1/convert",
     "/api/v1/status/",
@@ -63,12 +56,11 @@ class SoundBoostPayGateError(PermissionError):
 
 
 class SoundBoostClient:
-    """Production client for SoundBoost.ai with automatic `ui-token` signing & R2 failover."""
+    """Production client for SoundBoost.ai authenticating via OAuth / Bearer token & R2 failover."""
 
     def __init__(
         self,
         access_token: str | None = None,
-        encrypted_da_cookie: str | None = None,
         guest_token: str | None = None,
         timeout_sec: float = DEFAULT_TIMEOUT_SEC,
     ) -> None:
@@ -79,7 +71,7 @@ class SoundBoostClient:
         self.converta_url = os.environ.get("SOUNDBOOST_CONVERTA_URL", CONVERTA_URL).rstrip("/")
 
         self.guest_token = guest_token or os.environ.get("SOUNDBOOST_GUEST_TOKEN")
-        self.access_token = self._resolve_access_token(access_token, encrypted_da_cookie)
+        self.access_token = self._resolve_access_token(access_token)
         self.account_tier: str | None = os.environ.get("SOUNDBOOST_ACCOUNT_TIER")
         self.cached_entitlements: dict[str, Any] | None = None
         self.storage_proxy_host: str | None = None
@@ -88,14 +80,9 @@ class SoundBoostClient:
     @staticmethod
     def _resolve_access_token(
         access_token: str | None,
-        encrypted_da_cookie: str | None,
     ) -> str | None:
         if access_token and access_token.strip():
             return access_token.strip()
-        if encrypted_da_cookie and encrypted_da_cookie.strip():
-            decrypted = decrypt_cookie_value(encrypted_da_cookie.strip())
-            if isinstance(decrypted, str) and decrypted.strip():
-                return decrypted.strip()
         return load_token_from_vault()
 
     def _build_headers(
@@ -104,8 +91,7 @@ class SoundBoostClient:
         include_json_content_type: bool = True,
         studio_app: str | None = None,
     ) -> dict[str, str]:
-        headers = build_ui_security_headers()
-        headers["Accept"] = "application/json"
+        headers: dict[str, str] = {"Accept": "application/json"}
         if include_json_content_type:
             headers["Content-Type"] = "application/json"
         if self.access_token:
@@ -671,21 +657,18 @@ class SoundBoostClient:
         return dict(self._request("POST", url, json_body=payload))
 
     def build_studio_url(self, track_id: int | str, product: str | None = None) -> str:
-        """Build a signed `https://studio.soundboost.ai/?track=<hash>` deep link that bypasses Cloudflare's `/` redirect."""
-        enc_track = encrypt_param_id(track_id)
-        base = f"{self.studio_url}/?track={enc_track}"
-        if product:
-            base += f"&product={product}"
-        return base
+        """Build a Studio URL when an official/documented track parameter is provided by SoundBoost."""
+        # This endpoint needs a documented/official parameter from SoundBoost rather than reconstructing a client-side signer.
+        raise NotImplementedError(
+            "Building a Studio URL requires a documented/official track parameter from SoundBoost."
+        )
 
     def decrypt_studio_track_param(self, track_hash: str) -> int | str:
-        """Decrypt `?track=` locally via AES-128-CBC or fallback to `POST /api/decrypt-param-static` (Module 615)."""
-        try:
-            return decrypt_param_id(track_hash)
-        except (ValueError, KeyError, TypeError):
-            url = f"{self.mastering_url}/api/decrypt-param-static"
-            res = self._request("POST", url, json_body={"hash": track_hash})
-            return res.get("decryptedParam", track_hash)
+        """Resolve a Studio track parameter when an official/documented endpoint is provided by SoundBoost."""
+        # This endpoint needs a documented/official parameter from SoundBoost rather than reconstructing a client-side cipher.
+        raise NotImplementedError(
+            "Resolving a Studio track parameter requires a documented/official parameter from SoundBoost."
+        )
 
     # -----------------------------------------------------------------------
     # 4. Converta Hi-Res Audio Converter (`https://converta.soundboost.ai`)

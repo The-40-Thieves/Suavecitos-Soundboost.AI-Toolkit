@@ -1,7 +1,8 @@
-"""Platform constants, DSP tables, separation profiles, and protocol defaults."""
+"""Platform constants, DSP tables, separation profiles, and entitlement defaults."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Final
 
@@ -14,23 +15,6 @@ STUDIO_URL: Final[str] = "https://studio.soundboost.ai"
 CONVERTA_URL: Final[str] = "https://converta.soundboost.ai"
 SHOOTS_URL: Final[str] = "https://shoots.soundboost.ai"
 SMART_LINK_SHORT_DOMAIN: Final[str] = "https://soundboo.st"
-
-# ---------------------------------------------------------------------------
-# Public Client-Side Protocol Parameters (Studio Metro Modules 444, 446, 616)
-# Overridable via environment variables:
-#   SOUNDBOOST_UI_API_KEY, SOUNDBOOST_TOKEN_CIPHER, SOUNDBOOST_COOKIE_CIPHER,
-#   SOUNDBOOST_PARAM_CIPHER, SOUNDBOOST_PARAM_IV
-# ---------------------------------------------------------------------------
-DEFAULT_UI_HEADER_VAL: Final[str] = "dk-654321-jhgpol-2789456-ghysvn-bkjsqb"
-DEFAULT_TOKEN_CIPHER_VAL: Final[str] = "1837837__LEBlebi"
-DEFAULT_COOKIE_CIPHER_VAL: Final[str] = "inanilmaz_gizli_bir_anahtar"
-DEFAULT_PARAM_CIPHER_VAL: Final[str] = "siradan__anahtar"
-DEFAULT_PARAM_IV_HEX: Final[str] = "101112131415161718191a1b1c1d1e1f"
-
-PRODUCTION_KAT_ID: Final[int] = 1
-PRODUCTION_KAT_HASH: Final[str] = "Hck7LVPBFsyNC95Qzf6-0Q"
-
-USER_COOKIE_KEYS: Final[tuple[str, ...]] = ("_d_i", "_d_e", "_d_a", "_d_u")
 
 # ---------------------------------------------------------------------------
 # 18-Band Mastering Graphic EQ (mastering.soundboost.ai Manual EQ Engine)
@@ -252,6 +236,21 @@ MV_CHARACTER_REF_CAPS: Final[dict[str, int]] = {
     "director": 2,
     "studio": 3,
 }
+
+
+def compute_mv_spending_limit(quoted_credits: int) -> int:
+    """Calculate the AI Music Video (`h3-max`) retake spending cap.
+
+    Formula: credits + 3 * floor(credits / 20) + ceil(((credits % 20) * 3) / 20)
+    """
+    if quoted_credits <= 0:
+        return 0
+    return (
+        quoted_credits
+        + 3 * (quoted_credits // 20)
+        + math.ceil(((quoted_credits % 20) * 3) / 20)
+    )
+
 
 # SoundBoost Account Tiers & Exact Feature Entitlement Matrix
 # Extracted from Mastering `_app`, Studio `Module 584/585`, and Shoots `tierLevel`
@@ -572,13 +571,12 @@ MCP_TOOL_PACKS: Final[dict[str, dict[str, object]]] = {
     },
     "distribution": {
         "pack_id": "distribution",
-        "title": "Smart Links (`soundboo.st`) & Cryptographic Codec Pack",
+        "title": "Smart Links (`soundboo.st`) & Release Distribution Pack",
         "min_tier": "free",
         "always_pinned": False,
-        "summary": "Artist link-in-bio Smart Links (`soundboo.st/<slug>`) with auto-scraped DSP links and SoundBoost AES-CBC/CTR parameter & token cipher tools.",
+        "summary": "Artist link-in-bio Smart Links (`soundboo.st/<slug>`) with auto-scraped DSP links and release metadata.",
         "tools": (
             "soundboost_smart_links",
-            "soundboost_cipher_tool",
         ),
     },
     "mastering": {

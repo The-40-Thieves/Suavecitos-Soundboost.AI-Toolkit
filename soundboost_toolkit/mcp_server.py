@@ -47,16 +47,7 @@ from soundboost_toolkit.constants import (
     STEM_PROFILES,
     STREAMING_TARGETS,
     TIER_UNLOCKED_MCP_PACKS,
-)
-from soundboost_toolkit.crypto import (
-    build_ui_security_headers,
     compute_mv_spending_limit,
-    decrypt_cookie_value,
-    decrypt_param_id,
-    decrypt_ui_token,
-    encrypt_cookie_value,
-    encrypt_param_id,
-    verify_param_cipher_kat,
 )
 from soundboost_toolkit.dsp import (
     analyze_audio_file,
@@ -109,7 +100,7 @@ class SoundBoostProgressiveDiscoveryTransform(CatalogTransform):
     """Progressive Tool Discovery & Context-Window Budget Manager for SoundBoost MCP.
 
     Prevents agent context-window bloat by exposing only the 4 Pinned Entry Tools (`core` pack)
-    in `list_tools()` by default (~83% token reduction), while keeping all 23 tools:
+    in `list_tools()` by default (~82% token reduction), while keeping all 22 tools:
     1. Searchable on demand via BM25 Okapi relevance ranking (`action='search'`) with compact Markdown schemas.
     2. Dynamically activatable/deactivatable by domain pack (`action='activate_pack'` / `'deactivate_pack'`)
        with `notifications/tools/list_changed`.
@@ -292,10 +283,10 @@ async def soundboost_discover_tools(
     ctx: Context | None = None,
 ) -> Any:
     """Progressive tool discovery & context-window budget manager for SoundBoost MCP.
-    Keeps each agent's context window compact (~83% smaller initial `list_tools()`) by loading
+    Keeps each agent's context window compact (~82% smaller initial `list_tools()`) by loading
     domain tool packs on demand or syncing visible tools to the user's exact SoundBoost account level:
     - `catalog`: List all 8 tool packs (`core`, `free_tools`, `studio_harmony`, `studio_stems`, `distribution`, `mastering`, `bulk_mastering`, `music_video_shoots`), their active state, tool names, and required tier.
-    - `search`: Search all 23 tools using BM25 Okapi natural-language ranking (`query`), returning compact Markdown (`~70%` fewer tokens) or JSON schemas and optionally auto-unlocking matched tools in `list_tools()`.
+    - `search`: Search all 22 tools using BM25 Okapi natural-language ranking (`query`), returning compact Markdown (`~70%` fewer tokens) or JSON schemas and optionally auto-unlocking matched tools in `list_tools()`.
     - `activate_pack`: Enable one or more tool packs (`pack='mastering'`, `'studio_stems,studio_harmony'`, or `'all'`) or individual `tool_names`, and notify the MCP client via `notifications/tools/list_changed`.
     - `deactivate_pack`: Unload one or more tool packs (`pack='mastering'`) or `tool_names` when a task phase finishes to shrink the context window.
     - `sync_account_tier`: Resolve the user's SoundBoost account tier (`free`, `pay_as_you_go`, `starter`, `unlimited`, `creator`, `director`, `unlimited_plus`, `studio`) and enable ONLY the tool packs unlocked for that tier.
@@ -503,59 +494,6 @@ def write_release_metadata_tags(
         lyrics=lyrics,
         cover_art_path=cover_art_path,
     )
-
-
-@mcp.tool(
-    tags={"crypto", "auth", "protocol"},
-    annotations=ToolAnnotations(
-        title="SoundBoost AES-CBC Cipher & Token Generator",
-        read_only_hint=True,
-        destructive_hint=False,
-        idempotent_hint=True,
-        open_world_hint=False,
-    ),
-)
-def soundboost_cipher_tool(
-    action: str,
-    value: str = "1",
-    product: str | None = None,
-) -> dict[str, Any]:
-    """Execute SoundBoost cryptographic operations:
-    - `kat`: Run Known-Answer Self-Test (`1` -> `'Hck7LVPBFsyNC95Qzf6-0Q'`)
-    - `encrypt_track`: Encrypt integer track ID into `?track=` Base64URL hash and Studio deep link
-    - `decrypt_track`: Decrypt `?track=` hash back into track ID
-    - `generate_ui_headers`: Generate `ui-api-key` and AES-CBC time-windowed `ui-token` headers
-    - `decrypt_ui_token`: Decrypt a `ui-token` header value
-    - `encrypt_cookie`: Encrypt a value using CryptoJS OpenSSL `_d_a` cookie format
-    - `decrypt_cookie`: Decrypt a SoundBoost `_d_a` / `_d_e` / `_d_i` / `_d_u` cookie
-    """
-    act = action.strip().lower()
-    if act == "kat":
-        return {
-            "kat_passed": verify_param_cipher_kat(),
-            "encrypted_1": encrypt_param_id(1),
-            "decrypted_hash": decrypt_param_id("Hck7LVPBFsyNC95Qzf6-0Q"),
-        }
-    if act == "encrypt_track":
-        tid: int | str = int(value) if value.strip().isdigit() else value
-        enc = encrypt_param_id(tid)
-        client = SoundBoostClient()
-        return {
-            "track_id": tid,
-            "encrypted_hash": enc,
-            "studio_url": client.build_studio_url(tid, product=product),
-        }
-    if act == "decrypt_track":
-        return {"encrypted_hash": value, "track_id": decrypt_param_id(value)}
-    if act == "generate_ui_headers":
-        return build_ui_security_headers()
-    if act == "decrypt_ui_token":
-        return {"decrypted": decrypt_ui_token(value)}
-    if act == "encrypt_cookie":
-        return {"encrypted_cookie": encrypt_cookie_value(value)}
-    if act == "decrypt_cookie":
-        return {"decrypted_cookie": decrypt_cookie_value(value)}
-    raise ValueError(f"Unsupported action '{action}'")
 
 
 @mcp.tool(
@@ -1112,7 +1050,7 @@ async def soundboost_oauth_and_vault(
     - `status`: Check OS Keyring (`WinVaultKeyring`) and credential vault authentication status
     - `pkce_url`: Generate RFC 7636 S256 PKCE Google OAuth 2.0 authorization URL (`716860248198-...`)
     - `google_exchange`: Exchange a Google OAuth `id_token` / `access_token` at `POST /api/google-login/` and store the SoundBoost JWT in OS Keyring
-    - `save_token`: Save a SoundBoost Bearer JWT or encrypted `_d_a` cookie into OS Keyring
+    - `save_token`: Save a SoundBoost Bearer JWT into OS Keyring
     - `browser_handoff`: Launch local loopback OAuth callback server (`127.0.0.1:<port>/auth/callback`) to capture browser sign-in
     - `logout`: Clear stored credentials from OS Keyring and `~/.soundboost/credentials.json`
     """
@@ -1139,10 +1077,6 @@ async def soundboost_oauth_and_vault(
         if not token_or_cookie:
             raise ValueError("token_or_cookie is required for action='save_token'")
         raw = token_or_cookie.strip()
-        if raw.startswith("U2FsdGVkX1") or "%2F" in raw or "%2B" in raw:
-            dec = decrypt_cookie_value(raw)
-            if isinstance(dec, str) and dec.strip():
-                raw = dec.strip()
         return save_credentials_to_vault(raw, email=email, auth_method="manual_vault_save")
     if act == "browser_handoff":
         return await asyncio.to_thread(

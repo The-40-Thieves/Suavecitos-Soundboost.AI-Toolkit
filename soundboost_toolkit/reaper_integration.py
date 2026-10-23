@@ -44,8 +44,8 @@ from soundboost_toolkit.constants import (
     MASTERING_GENRE_PRESETS,
     MV_CHARACTER_REF_CAPS,
     STREAMING_TARGETS,
+    compute_mv_spending_limit,
 )
-from soundboost_toolkit.crypto import compute_mv_spending_limit
 from soundboost_toolkit.dsp import (
     analyze_audio_file,
     render_18band_master,

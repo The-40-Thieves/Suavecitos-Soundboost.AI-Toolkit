@@ -17,18 +17,7 @@ from soundboost_toolkit.client import (
 )
 from soundboost_toolkit.constants import (
     ACCOUNT_TIER_ENTITLEMENTS,
-    PRODUCTION_KAT_HASH,
-    PRODUCTION_KAT_ID,
-)
-from soundboost_toolkit.crypto import (
     compute_mv_spending_limit,
-    decrypt_cookie_value,
-    decrypt_param_id,
-    decrypt_ui_token,
-    encrypt_cookie_value,
-    encrypt_param_id,
-    generate_ui_token,
-    verify_param_cipher_kat,
 )
 from soundboost_toolkit.dsp import (
     analyze_audio_file,
@@ -69,23 +58,6 @@ from soundboost_toolkit.tagging import (
 
 
 class SoundBoostToolkitTests(unittest.TestCase):
-    def test_param_cipher_kat(self) -> None:
-        self.assertTrue(verify_param_cipher_kat())
-        self.assertEqual(encrypt_param_id(PRODUCTION_KAT_ID), PRODUCTION_KAT_HASH)
-        self.assertEqual(decrypt_param_id(PRODUCTION_KAT_HASH), PRODUCTION_KAT_ID)
-        for tid in (42, 1337, 999999):
-            enc = encrypt_param_id(tid)
-            self.assertEqual(decrypt_param_id(enc), tid)
-
-    def test_ui_token_and_cookie_ciphers(self) -> None:
-        tok = generate_ui_token(timestamp_iso="2026-10-23T10:00:00.000Z")
-        dec = decrypt_ui_token(tok)
-        self.assertTrue(dec.endswith("_2026-10-23T10:00:00.000Z"))
-
-        cookie_enc = encrypt_cookie_value({"session_id": "sample_session_123"})
-        cookie_dec = decrypt_cookie_value(cookie_enc)
-        self.assertEqual(cookie_dec, {"session_id": "sample_session_123"})
-
     def test_mv_spending_limit_formula(self) -> None:
         self.assertEqual(compute_mv_spending_limit(0), 0)
         self.assertEqual(compute_mv_spending_limit(20), 23)
@@ -218,7 +190,7 @@ class SoundBoostToolkitTests(unittest.TestCase):
                     {"action": "sync_account_tier", "account_tier": "free"},
                 )
                 free_tier_tools = {t.name for t in await client.list_tools()}
-                self.assertEqual(len(free_tier_tools), 17)
+                self.assertEqual(len(free_tier_tools), 16)
                 self.assertNotIn("soundboost_upload_and_master", free_tier_tools)
                 self.assertNotIn("soundboost_bulk_and_album_mastering", free_tier_tools)
 
@@ -227,21 +199,21 @@ class SoundBoostToolkitTests(unittest.TestCase):
                     {"action": "sync_account_tier", "account_tier": "unlimited"},
                 )
                 unlim_tier_tools = {t.name for t in await client.list_tools()}
-                self.assertEqual(len(unlim_tier_tools), 22)
+                self.assertEqual(len(unlim_tier_tools), 21)
                 self.assertIn("soundboost_upload_and_master", unlim_tier_tools)
                 self.assertNotIn("soundboost_bulk_and_album_mastering", unlim_tier_tools)
 
-                # 4. Unlock all 23 tools ('studio' tier / pack='all') and verify annotations on every tool
+                # 4. Unlock all 22 tools ('studio' tier / pack='all') and verify annotations on every tool
                 await client.call_tool(
                     "soundboost_discover_tools",
                     {"action": "activate_pack", "pack": "all"},
                 )
                 tools = await client.list_tools()
-                self.assertEqual(len(tools), 23)
+                self.assertEqual(len(tools), 22)
                 tool_map = {t.name: t for t in tools}
                 self.assertNotIn("render_local_18band_master", tool_map)
 
-                # Verify ToolAnnotations on all 23 tools
+                # Verify ToolAnnotations on all 22 tools
                 for t in tools:
                     self.assertIsNotNone(t.annotations, f"Missing annotations on {t.name}")
                     self.assertTrue(bool(t.annotations.title), f"Missing title on {t.name}")
@@ -272,9 +244,6 @@ class SoundBoostToolkitTests(unittest.TestCase):
                 await client.call_tool("soundboost_discover_tools", {"action": "reset"})
                 self.assertEqual(len(await client.list_tools()), 4)
 
-                kat_res = await client.call_tool("soundboost_cipher_tool", {"action": "kat"})
-                self.assertFalse(kat_res.is_error)
-
                 oauth_res = await client.call_tool("soundboost_oauth_and_vault", {"action": "pkce_url"})
                 self.assertFalse(oauth_res.is_error)
 
@@ -288,7 +257,7 @@ class SoundBoostToolkitTests(unittest.TestCase):
 
     def test_pay_gate_enforcement_on_paid_and_studio_endpoints(self) -> None:
         # Unauthenticated client (no token) must raise SoundBoostPayGateError on paid/studio endpoints
-        unauth_client = SoundBoostClient(access_token="", encrypted_da_cookie="")
+        unauth_client = SoundBoostClient(access_token="")
         unauth_client.access_token = None
 
         self.assertTrue(unauth_client._is_public_free_url("https://converta.soundboost.ai/api/v1/formats"))
@@ -308,6 +277,11 @@ class SoundBoostToolkitTests(unittest.TestCase):
             unauth_client.start_studio_stem_split(42, "hifi_6stem")
         with self.assertRaises(SoundBoostPayGateError):
             unauth_client.request_converta_stem_export({"semitones": 2})
+
+        with self.assertRaises(NotImplementedError):
+            unauth_client.build_studio_url(42)
+        with self.assertRaises(NotImplementedError):
+            unauth_client.decrypt_studio_track_param("param")
 
     def test_account_tier_entitlements_and_feature_unlocking(self) -> None:
         self.assertEqual(len(ACCOUNT_TIER_ENTITLEMENTS), 8)

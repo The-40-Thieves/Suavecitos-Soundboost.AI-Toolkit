@@ -12,14 +12,7 @@ from soundboost_toolkit.constants import (
     MASTERING_GENRE_PRESETS,
     MV_CHARACTER_REF_CAPS,
     STEM_PROFILES,
-)
-from soundboost_toolkit.crypto import (
-    build_ui_security_headers,
     compute_mv_spending_limit,
-    decrypt_cookie_value,
-    decrypt_param_id,
-    encrypt_param_id,
-    verify_param_cipher_kat,
 )
 from soundboost_toolkit.dsp import (
     analyze_audio_file,
@@ -208,28 +201,6 @@ def cmd_tags(
         )
     else:
         out = read_audio_tags(file_path)
-    console.print_json(data=out)
-
-
-@app.command("cipher")
-def cmd_cipher(
-    track_id: int | None = typer.Option(None, "--encrypt-track", "-e", help="Encrypt integer track ID to `?track=` hash"),
-    track_hash: str | None = typer.Option(None, "--decrypt-track", "-d", help="Decrypt `?track=` hash back to integer ID"),
-    cookie_da: str | None = typer.Option(None, "--decrypt-cookie", help="Decrypt SoundBoost `_d_a` cookie"),
-    ui_headers: bool = typer.Option(False, "--ui-headers", help="Generate live `ui-api-key` and `ui-token` headers"),
-) -> None:
-    """Run SoundBoost AES-CBC cipher operations and Studio Known-Answer Self-Test (KAT)."""
-    out: dict[str, object] = {"kat_self_test_passed": verify_param_cipher_kat()}
-    client = SoundBoostClient()
-    if track_id is not None:
-        out["encrypted_track_hash"] = encrypt_param_id(track_id)
-        out["studio_deep_link"] = client.build_studio_url(track_id)
-    if track_hash is not None:
-        out["decrypted_track_id"] = decrypt_param_id(track_hash)
-    if cookie_da is not None:
-        out["decrypted_cookie"] = decrypt_cookie_value(cookie_da)
-    if ui_headers:
-        out["ui_headers"] = build_ui_security_headers()
     console.print_json(data=out)
 
 
@@ -520,7 +491,7 @@ def cmd_auth(
         None,
         "--token",
         "-t",
-        help="Google OAuth token, SoundBoost Bearer JWT, or encrypted `_d_a` cookie",
+        help="Google OAuth token or SoundBoost Bearer JWT",
     ),
     email: str | None = typer.Option(None, "--email", help="Optional account email metadata"),
     port: int = typer.Option(8765, "--port", help="Local loopback callback port"),
@@ -556,10 +527,6 @@ def cmd_auth(
         if not token:
             raise typer.BadParameter("--token is required for save-token")
         raw = token.strip()
-        if raw.startswith("U2FsdGVkX1") or "%2F" in raw or "%2B" in raw:
-            dec = decrypt_cookie_value(raw)
-            if isinstance(dec, str) and dec.strip():
-                raw = dec.strip()
         console.print_json(
             data=save_credentials_to_vault(raw, email=email, auth_method="cli_save_token")
         )
@@ -582,7 +549,7 @@ def cmd_serve_mcp(
     discovery: str = typer.Option(
         "progressive",
         "--discovery",
-        help="Progressive tool discovery mode: progressive (4 entry tools + BM25 search/pack unlock) | all (all 23 tools visible)",
+        help="Progressive tool discovery mode: progressive (4 entry tools + BM25 search/pack unlock) | all (all 22 tools visible)",
     ),
     packs: str | None = typer.Option(
         None,

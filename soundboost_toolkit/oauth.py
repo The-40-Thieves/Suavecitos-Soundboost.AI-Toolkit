@@ -34,8 +34,6 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier
 from keyring.errors import KeyringError
 from pydantic import AnyHttpUrl
 
-from soundboost_toolkit.crypto import decrypt_cookie_value
-
 KEYRING_SERVICE_NAME = "suavecitos-soundboost-toolkit"
 KEYRING_CREDENTIAL_ENTRY = "soundboost_bearer_credential"
 KEYRING_ACCOUNT_META = "soundboost_account_metadata"
@@ -110,15 +108,6 @@ def load_token_from_vault() -> str | None:
     if env_tok:
         return env_tok
 
-    env_cookie = os.environ.get("SOUNDBOOST_COOKIE_DA", "").strip()
-    if env_cookie:
-        try:
-            dec = decrypt_cookie_value(env_cookie)
-            if isinstance(dec, str) and dec.strip():
-                return dec.strip()
-        except (ValueError, KeyError, TypeError):
-            pass
-
     try:
         kr_tok = keyring.get_password(KEYRING_SERVICE_NAME, KEYRING_CREDENTIAL_ENTRY)
         if kr_tok and kr_tok.strip():
@@ -132,10 +121,6 @@ def load_token_from_vault() -> str | None:
             data = json.loads(cred_file.read_text(encoding="utf-8"))
             if isinstance(data.get("access_token"), str) and data["access_token"].strip():
                 return str(data["access_token"]).strip()
-            if isinstance(data.get("_d_a"), str) and data["_d_a"].strip():
-                dec = decrypt_cookie_value(data["_d_a"])
-                if isinstance(dec, str) and dec.strip():
-                    return dec.strip()
         except (OSError, ValueError, KeyError, TypeError):
             return None
     return None
@@ -245,7 +230,7 @@ def run_loopback_oauth_handoff(
     open_browser: bool = True,
 ) -> dict[str, Any]:
     """Start a local loopback HTTP callback server (`127.0.0.1:<port>/auth/callback`) that accepts
-    a Google OAuth callback, a SoundBoost Bearer JWT, or an encrypted `_d_a` cookie from the browser
+    a Google OAuth callback or a SoundBoost Bearer JWT from the browser
     and stores it directly in OS Keyring (`WinVaultKeyring`).
     """
     redirect_uri = f"http://127.0.0.1:{port}/auth/callback"
@@ -269,13 +254,13 @@ def run_loopback_oauth_handoff(
 <body>
   <div class="card">
     <h1>Suavecito's Soundboost.AI Toolkit — OAuth Handoff</h1>
-    <p>Sign in via Google OAuth or paste your SoundBoost <code>_d_a</code> cookie / Bearer token below to store it in your OS Keyring:</p>
+    <p>Sign in via Google OAuth or paste your SoundBoost Bearer token below to store it in your OS Keyring:</p>
     <p><a class="btn" href="{pkce.authorize_url}">Continue with Google OAuth</a></p>
     <hr style="border-color:#262d40;margin:20px 0;">
     <form method="GET" action="/auth/callback">
       <input type="hidden" name="state" value="{pkce.state}">
-      <label>SoundBoost Bearer Token or Encrypted <code>_d_a</code> Cookie:</label>
-      <input type="text" name="session_token" placeholder="eyJ... or U2FsdGVkX1..." required>
+      <label>SoundBoost Bearer Token:</label>
+      <input type="text" name="session_token" placeholder="eyJ..." required>
       <button type="submit">Save to OS Keyring</button>
     </form>
   </div>
@@ -315,14 +300,6 @@ def run_loopback_oauth_handoff(
             captured["redirect_uri"] = redirect_uri
 
             if raw_sess:
-                # Check if encrypted _d_a cookie or direct JWT
-                if raw_sess.startswith("U2FsdGVkX1") or "%2F" in raw_sess or "%2B" in raw_sess:
-                    try:
-                        dec = decrypt_cookie_value(raw_sess)
-                        if isinstance(dec, str) and dec.strip():
-                            raw_sess = dec.strip()
-                    except (ValueError, KeyError, TypeError):
-                        pass
                 vault_res = save_credentials_to_vault(raw_sess, auth_method="loopback_handoff")
                 captured["vault"] = vault_res
                 captured["status"] = "saved"
