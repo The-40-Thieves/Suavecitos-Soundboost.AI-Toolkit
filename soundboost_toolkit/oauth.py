@@ -69,14 +69,14 @@ def _write_private_file(path: Path, content: str) -> None:
     try:
         os.chmod(path.parent, 0o700)
     except OSError:
-        pass
+        pass  # Windows ignores POSIX modes; the user-profile ACL still applies.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(content)
     try:
         os.chmod(path, 0o600)
     except OSError:
-        pass
+        pass  # Same as above: best effort on filesystems without POSIX modes.
 
 
 def _keyring_backend_name() -> str:
@@ -148,7 +148,7 @@ def load_token_from_vault() -> str | None:
         if kr_tok and kr_tok.strip():
             return kr_tok.strip()
     except (KeyringError, RuntimeError):
-        pass
+        pass  # No usable keyring backend; fall through to the file fallback.
 
     cred_file = _credentials_file_path()
     if cred_file.exists():
@@ -194,7 +194,7 @@ def clear_vault_credentials() -> dict[str, Any]:
             keyring.delete_password(KEYRING_SERVICE_NAME, acct)
             kr_cleared = True
         except (KeyringError, RuntimeError):
-            pass
+            pass  # Entry absent or no backend; nothing to clear.
 
     cred_file = _credentials_file_path()
     file_deleted = False

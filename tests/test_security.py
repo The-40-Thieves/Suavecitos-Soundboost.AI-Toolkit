@@ -10,10 +10,10 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 from soundboost_toolkit import oauth
 from soundboost_toolkit.client import SoundBoostClient, SoundBoostPayGateError
@@ -40,7 +40,7 @@ class PathSandboxTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name).resolve()
-        self._env = mock.patch.dict(os.environ, {"SOUNDBOOST_ALLOWED_DIRS": str(self.root)})
+        self._env = unittest.mock.patch.dict(os.environ, {"SOUNDBOOST_ALLOWED_DIRS": str(self.root)})
         self._env.start()
 
     def tearDown(self) -> None:
@@ -99,9 +99,9 @@ class PathSandboxTests(unittest.TestCase):
 
 class VaultTests(unittest.TestCase):
     def test_keyring_success_never_writes_plaintext(self) -> None:
-        with tempfile.TemporaryDirectory() as home, mock.patch.object(
+        with tempfile.TemporaryDirectory() as home, unittest.mock.patch.object(
             oauth, "_credentials_file_path", return_value=Path(home) / ".soundboost" / "credentials.json"
-        ), mock.patch.object(oauth.keyring, "set_password") as setpw:
+        ), unittest.mock.patch.object(oauth.keyring, "set_password") as setpw:
             stale = Path(home) / ".soundboost" / "credentials.json"
             stale.parent.mkdir(parents=True)
             stale.write_text("{}", encoding="utf-8")
@@ -112,9 +112,9 @@ class VaultTests(unittest.TestCase):
             self.assertEqual(setpw.call_count, 2)
 
     def test_keyring_failure_writes_owner_only_file(self) -> None:
-        with tempfile.TemporaryDirectory() as home, mock.patch.object(
+        with tempfile.TemporaryDirectory() as home, unittest.mock.patch.object(
             oauth, "_credentials_file_path", return_value=Path(home) / ".soundboost" / "credentials.json"
-        ), mock.patch.object(oauth.keyring, "set_password", side_effect=oauth.KeyringError("no backend")):
+        ), unittest.mock.patch.object(oauth.keyring, "set_password", side_effect=oauth.KeyringError("no backend")):
             res = oauth.save_credentials_to_vault("tok-456")
             cred = Path(res["plaintext_fallback_file"])
             self.assertEqual(json.loads(cred.read_text(encoding="utf-8"))["access_token"], "tok-456")
@@ -122,7 +122,7 @@ class VaultTests(unittest.TestCase):
                 self.assertEqual(cred.stat().st_mode & 0o777, 0o600)
 
     def test_status_never_reveals_token(self) -> None:
-        with mock.patch.dict(os.environ, {"SOUNDBOOST_ACCESS_TOKEN": "secret-token-value-123456"}):
+        with unittest.mock.patch.dict(os.environ, {"SOUNDBOOST_ACCESS_TOKEN": "secret-token-value-123456"}):
             status = oauth.get_vault_status()
         self.assertNotIn("secret", json.dumps(status))
         self.assertEqual(status["token_source"], "environment")
@@ -163,7 +163,7 @@ class LoopbackHandoffTests(unittest.TestCase):
 
     def test_rejects_missing_state_and_foreign_host_then_accepts_valid_post(self) -> None:
         port = _free_port()
-        with mock.patch.object(oauth, "save_credentials_to_vault", return_value={"saved_to_os_keyring": True}) as save:
+        with unittest.mock.patch.object(oauth, "save_credentials_to_vault", return_value={"saved_to_os_keyring": True}) as save:
             th, out = self._start(port)
             # Missing state must not be accepted (previously bypassed the CSRF check)
             self.assertEqual(self._request(port, "GET", "/auth/callback?session_token=evil"), 400)
@@ -188,7 +188,7 @@ class LoopbackHandoffTests(unittest.TestCase):
 
 class InboundAccessTests(unittest.TestCase):
     def test_email_allowlist(self) -> None:
-        with mock.patch.dict(os.environ, {"SOUNDBOOST_MCP_ALLOWED_EMAILS": "Me@Example.com"}):
+        with unittest.mock.patch.dict(os.environ, {"SOUNDBOOST_MCP_ALLOWED_EMAILS": "Me@Example.com"}):
             ok = SimpleNamespace(token=SimpleNamespace(claims={"email": "me@example.com", "email_verified": True}))
             other = SimpleNamespace(token=SimpleNamespace(claims={"email": "x@example.com"}))
             unverified = SimpleNamespace(token=SimpleNamespace(claims={"email": "me@example.com", "email_verified": False}))
@@ -201,10 +201,10 @@ class InboundAccessTests(unittest.TestCase):
 
     def test_http_serve_refuses_unsafe_configurations(self) -> None:
         env = {k: v for k, v in os.environ.items() if not k.startswith("SOUNDBOOST_")}
-        with mock.patch.dict(os.environ, env, clear=True):
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
             with self.assertRaises(RuntimeError):
                 serve(transport="http", host="127.0.0.1")  # no allowed dirs
-            with mock.patch.dict(os.environ, {"SOUNDBOOST_ALLOWED_DIRS": tempfile.gettempdir()}):
+            with unittest.mock.patch.dict(os.environ, {"SOUNDBOOST_ALLOWED_DIRS": tempfile.gettempdir()}):
                 with self.assertRaises(RuntimeError):
                     serve(transport="http", host="0.0.0.0")  # noqa: S104 - asserting it is refused
 
@@ -212,7 +212,7 @@ class InboundAccessTests(unittest.TestCase):
 class EntitlementGateTests(unittest.TestCase):
     def test_verified_free_account_is_blocked_from_plus_features(self) -> None:
         client = SoundBoostClient(access_token="t")
-        with mock.patch.object(client, "get_billing_info", return_value={"plan": "free"}):
+        with unittest.mock.patch.object(client, "get_billing_info", return_value={"plan": "free"}):
             with self.assertRaises(SoundBoostPayGateError):
                 client.require_feature_entitlement("studio_hifi_plus_stems_unlocked")
 
@@ -220,7 +220,7 @@ class EntitlementGateTests(unittest.TestCase):
         import httpx
 
         client = SoundBoostClient(access_token="t")
-        with mock.patch.object(client, "get_billing_info", side_effect=httpx.ConnectError("down")):
+        with unittest.mock.patch.object(client, "get_billing_info", side_effect=httpx.ConnectError("down")):
             ent = client.require_feature_entitlement("studio_hifi_plus_stems_unlocked")
         self.assertEqual(ent["tier_source"], "unknown")
 
