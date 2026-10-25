@@ -344,7 +344,7 @@ def run_loopback_oauth_handoff(
         return bool(candidate) and hmac.compare_digest(candidate, pkce.state)
 
     class _CallbackHandler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        def log_message(self, log_format: str, *args: Any) -> None:
             return
 
         def _reply(self, status: int, body: bytes, content_type: str = "text/plain") -> None:

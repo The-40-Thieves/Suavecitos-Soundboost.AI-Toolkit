@@ -215,7 +215,7 @@ Sign in with `soundboost auth browser-login` and your token is stored in your OS
 | `SOUNDBOOST_ALLOWED_DIRS` | Folders the MCP tools may read and write, separated by `;` on Windows or `:` elsewhere. Defaults to the current folder plus Music, Documents, Desktop, Downloads, and Videos. |
 | `SOUNDBOOST_GOOGLE_CLIENT_ID` / `SOUNDBOOST_GOOGLE_CLIENT_SECRET` | A Google "Desktop app" OAuth client for the **Continue with Google** button in `browser-login`. Without it you paste a SoundBoost token instead. |
 | `SOUNDBOOST_REAPER_ACTION_ALLOWLIST` | Extra REAPER action IDs the agent may trigger. By default only transport and save actions are allowed. |
-| `SOUNDBOOST_MCP_OAUTH_CLIENT_ID`, `SOUNDBOOST_MCP_OAUTH_CLIENT_SECRET`, `SOUNDBOOST_MCP_JWT_SIGNING_KEY`, `SOUNDBOOST_MCP_ALLOWED_EMAILS` | Required when serving over HTTP with `--oauth` (see above). |
+| `SOUNDBOOST_MCP_OAUTH_CLIENT_ID`, `SOUNDBOOST_MCP_OAUTH_CLIENT_SECRET`, `SOUNDBOOST_MCP_JWT_SIGNING_KEY`, `SOUNDBOOST_MCP_ALLOWED_EMAILS` | Required when serving over HTTP with `--oauth` (see above). Only identities whose token carries `email_verified: true` and a listed e-mail get in. |
 
 ---
 

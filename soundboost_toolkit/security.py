@@ -118,7 +118,9 @@ def email_allowlist_check(ctx: Any) -> bool:
         return False
     claims: dict[str, Any] = getattr(token, "claims", None) or {}
     email = str(claims.get("email") or "").strip().lower()
-    if not email or claims.get("email_verified") is False:
+    # Require an explicit verified claim: a provider that omits it is not trusted.
+    verified = claims.get("email_verified")
+    if not email or not (verified is True or str(verified).lower() == "true"):
         return False
     return email in allowed_emails()
 

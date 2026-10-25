@@ -195,6 +195,8 @@ class InboundAccessTests(unittest.TestCase):
             self.assertTrue(email_allowlist_check(ok))
             self.assertFalse(email_allowlist_check(other))
             self.assertFalse(email_allowlist_check(unverified))
+            missing = SimpleNamespace(token=SimpleNamespace(claims={"email": "me@example.com"}))
+            self.assertFalse(email_allowlist_check(missing))
             self.assertFalse(email_allowlist_check(SimpleNamespace(token=None)))
 
     def test_http_serve_refuses_unsafe_configurations(self) -> None:
