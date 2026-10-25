@@ -115,6 +115,19 @@ def _optional_path(raw: str | None, **kwargs: Any) -> str | None:
     return str(resolve_user_path(raw, **kwargs)) if raw else None
 
 
+def _sandbox_video_scene(scene: str | dict[str, Any]) -> str | dict[str, Any]:
+    """Resolve a video scene's file through the path sandbox, whether given as a path or a dict."""
+    suffixes = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS
+    if isinstance(scene, str):
+        return str(resolve_user_path(scene, must_exist=True, allowed_suffixes=suffixes))
+    raw = scene.get("file") or scene.get("path")
+    if not raw:
+        raise ValueError("Each video scene dict needs a 'file' (or 'path') entry.")
+    safe = {k: v for k, v in scene.items() if k != "path"}
+    safe["file"] = str(resolve_user_path(str(raw), must_exist=True, allowed_suffixes=suffixes))
+    return safe
+
+
 def redact_login_result(res: dict[str, Any]) -> dict[str, Any]:
     """Drop bearer/refresh tokens from a login response before it reaches the model."""
     secret_keys = {"access", "access_token", "refresh", "refresh_token", "token", "id_token"}
@@ -1280,12 +1293,7 @@ def install_reaper_jsfx_and_scripts(
             audit_audio_path, must_exist=True, allowed_suffixes=AUDIO_EXTENSIONS
         )
     if video_scenes:
-        video_scenes = [
-            str(resolve_user_path(v, must_exist=True, allowed_suffixes=VIDEO_EXTENSIONS | IMAGE_EXTENSIONS))
-            if isinstance(v, str)
-            else v
-            for v in video_scenes
-        ]
+        video_scenes = [_sandbox_video_scene(v) for v in video_scenes]
     if act == "install":
         return install_reaper_assets(
             reaper_resource_dir,
