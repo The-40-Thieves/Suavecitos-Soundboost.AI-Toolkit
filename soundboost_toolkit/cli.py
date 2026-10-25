@@ -22,9 +22,8 @@ from soundboost_toolkit.dsp import (
     quantize_loop_to_bar_beat_sixteenth,
     transpose_chord_symbol,
 )
-from soundboost_toolkit.mcp_server import list_soundboost_platform_capabilities
+from soundboost_toolkit.mcp_server import list_soundboost_platform_capabilities, redact_login_result
 from soundboost_toolkit.oauth import (
-    build_mcp_oauth_provider,
     clear_vault_credentials,
     generate_google_pkce_challenge,
     get_vault_status,
@@ -384,6 +383,8 @@ def cmd_reaper(
     enable_daemon: bool = typer.Option(
         False, "--enable-daemon", help="On install: also install the __startup.lua auto-start daemon hook (opt-in)."
     ),
+    enable_osc: bool = typer.Option(False, "--enable-osc", help="Also enable REAPER's OSC surface (listens on the LAN)"),
+    enable_web: bool = typer.Option(False, "--enable-web", help="Also enable REAPER's web surface (listens on the LAN, no password by default)"),
 ) -> None:
     """Deep REAPER 7.82 integration & video pipeline controller (JSFX `gmem`, HTTP/OSC/IPC Live Bridge, `Shoots` Storyboard, `.MP4` Renderer & `.RPP` Generator)."""
     act = action.strip().lower().replace("_", "-")
@@ -396,11 +397,17 @@ def cmd_reaper(
                 reaper_dir,
                 configure_ini_bridge=configure_bridge,
                 enable_startup_daemon=enable_daemon,
+                enable_osc_surface=enable_osc,
+                enable_http_web_surface=enable_web,
             )
         )
         return
     if act == "configure-bridge":
-        console.print_json(data=configure_reaper_ini_bridge(reaper_dir))
+        console.print_json(
+            data=configure_reaper_ini_bridge(
+                reaper_dir, enable_osc_surface=enable_osc, enable_http_web_surface=enable_web
+            )
+        )
         return
 
     bridge = ReaperLiveBridge(reaper_resource_dir=reaper_dir)
@@ -549,13 +556,17 @@ def cmd_auth(
         )
     elif act == "browser-login":
         console.print_json(
-            data=run_loopback_oauth_handoff(port=port, open_browser=not no_browser)
+            data=run_loopback_oauth_handoff(
+                port=port,
+                open_browser=not no_browser,
+                exchange_google_id_token=lambda id_tok: SoundBoostClient().google_oauth_login(id_tok, True),
+            )
         )
     elif act == "google-exchange":
         if not token:
             raise typer.BadParameter("--token is required for google-exchange")
         client = SoundBoostClient()
-        console.print_json(data=client.google_oauth_login(token, save_credentials=True))
+        console.print_json(data=redact_login_result(client.google_oauth_login(token, save_credentials=True)))
     elif act == "save-token":
         if not token:
             raise typer.BadParameter("--token is required for save-token")
@@ -582,7 +593,7 @@ def cmd_serve_mcp(
     discovery: str = typer.Option(
         "progressive",
         "--discovery",
-        help="Progressive tool discovery mode: progressive (4 entry tools + BM25 search/pack unlock) | all (all 22 tools visible)",
+        help="Progressive tool discovery mode: progressive (5 entry tools + BM25 search/pack unlock) | all (all 26 tools visible)",
     ),
     packs: str | None = typer.Option(
         None,
@@ -592,8 +603,7 @@ def cmd_serve_mcp(
 ) -> None:
     """Launch the FastMCP server over `stdio` or OAuth 2.1-protected `Streamable HTTP` with progressive tool discovery."""
     from soundboost_toolkit.constants import MCP_TOOL_PACKS
-    from soundboost_toolkit.mcp_server import PROGRESSIVE_DISCOVERY
-    from soundboost_toolkit.mcp_server import mcp as mcp_instance
+    from soundboost_toolkit.mcp_server import PROGRESSIVE_DISCOVERY, serve
 
     disc_mode = discovery.strip().lower()
     if disc_mode == "all":
@@ -608,12 +618,10 @@ def cmd_serve_mcp(
                 if pk in MCP_TOOL_PACKS:
                     PROGRESSIVE_DISCOVERY.active_packs.add(pk)
 
-    if oauth and oauth.strip().lower() != "none":
-        mcp_instance.auth = build_mcp_oauth_provider(oauth)
-    if transport.strip().lower() == "stdio":
-        mcp_instance.run(transport="stdio")
-    else:
-        mcp_instance.run(transport=transport.strip().lower(), host=host, port=port)
+    try:
+        serve(transport=transport, host=host, port=port, oauth=oauth)
+    except RuntimeError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @app.command("bulk-master")
@@ -634,7 +642,7 @@ def cmd_bulk_master(
     elif act == "start":
         if not tracks_csv:
             raise typer.BadParameter("--tracks is required for start")
-        tids = [x.strip() for x in tracks_csv.split(",") if x.strip()]
+        tids: list[int | str] = [x.strip() for x in tracks_csv.split(",") if x.strip()]
         res = client.start_bulk_mastering(
             tids,
             mode=mode,

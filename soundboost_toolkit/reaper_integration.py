@@ -26,13 +26,13 @@ from __future__ import annotations
 import ctypes
 import json
 import os
-import re
 import shutil
 import socket
 import struct
 import sys
 import time
 import uuid
+from collections.abc import Sequence
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
@@ -363,17 +363,32 @@ def build_rfxchain_content(
     )
 
 
+SUAVECITO_CSURF_STATE_FILE = "REAPER.ini.suavecito.json"
+
+
 def configure_reaper_ini_bridge(
     reaper_resource_dir: str | Path | None = None,
     http_port: int = 8080,
     osc_listen_port: int = 9000,
     osc_send_port: int = 9001,
+    *,
+    enable_python_reascript: bool = True,
+    enable_osc_surface: bool = False,
+    enable_http_web_surface: bool = False,
+    allow_while_running: bool = False,
 ) -> dict[str, Any]:
-    """Safely configure `REAPER.ini` to enable:
-    - Embedded Python 3.13 ReaScript (`reascript=1`, `pythonlibdll64=python313.dll`, `pythonlibpath64`)
-    - Loopback HTTP Web Control Surface (`csurf_0=HTTP 0 8080 'index.html' '' 0 ''`)
-    - Loopback UDP OSC Control Surface (`csurf_1=OSC "SoundBoost" 7 9000 "127.0.0.1" 9001 1024 10 "Default"`)
-    Creates a `.suavecito.bak` backup of `REAPER.ini` before writing.
+    """Configure `REAPER.ini` for the Suavecito bridge without disturbing existing settings.
+
+    - Python ReaScript (`reascript=1`, `pythonlibdll64`, `pythonlibpath64`) when requested.
+    - Optional OSC (`enable_osc_surface`) and Web (`enable_http_web_surface`) control surfaces.
+      Both are OFF by default: REAPER's OSC and web surfaces listen on every network interface
+      and the web surface has no password unless one is set in Preferences, so anyone on the
+      LAN could drive transport and run actions. The file-mailbox IPC daemon needs neither.
+    - Existing control surfaces are preserved; only surfaces this function added before
+      (tracked in `REAPER.ini.suavecito.json`) are replaced.
+    - A timestamped backup of `REAPER.ini` is written before every change.
+    - Refuses to edit while `reaper.exe` is running (REAPER rewrites `REAPER.ini` on exit,
+      discarding external edits) unless `allow_while_running=True`.
     """
     res_dir = (
         Path(reaper_resource_dir).expanduser().resolve()
@@ -383,112 +398,100 @@ def configure_reaper_ini_bridge(
     ini_path = res_dir / "REAPER.ini"
     if not ini_path.exists():
         return {"status": "skipped", "reason": f"REAPER.ini not found at {ini_path}"}
+    edits_live_install = res_dir == get_reaper_appdata_dir().resolve()
+    if (
+        not allow_while_running
+        and edits_live_install
+        and sys.platform == "win32"
+        and _find_running_reaper_pids_win32()
+    ):
+        return {
+            "status": "skipped",
+            "reason": "REAPER is running; close it first so it does not overwrite REAPER.ini on exit.",
+        }
 
-    backup_path = res_dir / "REAPER.ini.suavecito.bak"
-    if not backup_path.exists():
-        shutil.copy2(ini_path, backup_path)
+    state_path = res_dir / SUAVECITO_CSURF_STATE_FILE
+    try:
+        prior_state = json.loads(state_path.read_text(encoding="utf-8"))
+        owned_lines = {str(x) for x in prior_state.get("owned_csurf_lines", [])}
+    except (OSError, ValueError):
+        owned_lines = set()
+
+    backup_path = res_dir / f"REAPER.ini.suavecito-{time.strftime('%Y%m%d-%H%M%S')}.bak"
+    shutil.copy2(ini_path, backup_path)
 
     py_dir = str(Path(sys.executable).resolve().parent)
     py_dll = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+    wanted_surfaces: list[str] = []
+    if enable_http_web_surface:
+        wanted_surfaces.append(f"HTTP 0 {int(http_port)} 'index.html' '' 0 ''")
+    if enable_osc_surface:
+        wanted_surfaces.append(
+            f'OSC "SoundBoost" 7 {int(osc_listen_port)} "127.0.0.1" {int(osc_send_port)} 1024 10 "Default"'
+        )
 
-    raw_lines = ini_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = ini_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    sec_start = next((i for i, ln in enumerate(lines) if ln.strip().lower() == "[reaper]"), None)
+    if sec_start is None:
+        lines.append("[reaper]")
+        sec_start = len(lines) - 1
+    sec_end = next(
+        (i for i in range(sec_start + 1, len(lines)) if lines[i].strip().startswith("[")),
+        len(lines),
+    )
+    section = lines[sec_start + 1 : sec_end]
 
-    # First pass: discover the existing control-surface layout inside [reaper].
-    # We preserve the user's own surfaces and, crucially, REUSE the slots of any
-    # SoundBoost surfaces a prior run installed (detected by value) so repeated
-    # calls are idempotent instead of appending duplicates and inflating csurf_cnt.
-    http_value = f"HTTP 0 {http_port} 'index.html' '' 0 ''"
-    existing_csurf_cnt = 0
-    existing: dict[int, str] = {}
-    in_sec = False
-    for line in raw_lines:
-        s = line.strip()
-        if s.startswith("[") and s.endswith("]"):
-            in_sec = s.lower() == "[reaper]"
+    # Collect existing surfaces in order, dropping the ones we previously added.
+    kept_surfaces: list[str] = []
+    other_lines: list[str] = []
+    csurf_values: dict[int, str] = {}
+    for ln in section:
+        key, sep, val = ln.partition("=")
+        k = key.strip().lower()
+        if sep and k.startswith("csurf_") and k[6:].isdigit():
+            csurf_values[int(k[6:])] = val
+        elif sep and k == "csurf_cnt":
             continue
-        if not in_sec:
+        elif enable_python_reascript and sep and k in {"reascript", "pythonlibdll64", "pythonlibpath64"}:
             continue
-        if s.startswith("csurf_cnt="):
-            try:
-                existing_csurf_cnt = int(s.split("=", 1)[1].strip())
-            except ValueError:
-                existing_csurf_cnt = 0
         else:
-            m = re.match(r"csurf_(\d+)=(.*)$", s)
-            if m:
-                existing[int(m.group(1))] = m.group(2).strip()
+            other_lines.append(ln)
+    for idx in sorted(csurf_values):
+        val = csurf_values[idx]
+        legacy_http = val.strip() == f"HTTP 0 {int(http_port)} 'index.html' '' 0 ''"
+        if val not in owned_lines and 'OSC "SoundBoost"' not in val and not legacy_http:
+            kept_surfaces.append(val)
 
-    # Identify SoundBoost's own prior entries by value (our exact HTTP line, or any
-    # OSC surface named "SoundBoost") so we overwrite those indices in place.
-    reuse_http_idx = next((i for i, v in existing.items() if v == http_value), None)
-    reuse_osc_idx = next(
-        (i for i, v in existing.items() if v.startswith('OSC "SoundBoost"')), None
-    )
-    ours = {reuse_http_idx, reuse_osc_idx}
-    external_indices = [i for i in existing if i not in ours]
-    next_free = max(existing_csurf_cnt, (max(external_indices) + 1) if external_indices else 0)
+    surfaces = kept_surfaces + wanted_surfaces
+    new_section = list(other_lines)
+    if enable_python_reascript:
+        new_section += ["reascript=1", f"pythonlibpath64={py_dir}", f"pythonlibdll64={py_dll}"]
+    new_section.append(f"csurf_cnt={len(surfaces)}")
+    new_section += [f"csurf_{i}={val}" for i, val in enumerate(surfaces)]
 
-    if reuse_http_idx is not None:
-        http_idx = reuse_http_idx
-    else:
-        http_idx = next_free
-        next_free += 1
-    if reuse_osc_idx is not None:
-        osc_idx = reuse_osc_idx
-    else:
-        osc_idx = next_free
-        next_free += 1
-
-    new_csurf_cnt = max(existing_csurf_cnt, http_idx + 1, osc_idx + 1)
-
-    http_line = f"csurf_{http_idx}={http_value}"
-    osc_line = (
-        f'csurf_{osc_idx}=OSC "SoundBoost" 7 {osc_listen_port} "127.0.0.1" '
-        f'{osc_send_port} 1024 10 "Default"'
+    lines[sec_start + 1 : sec_end] = new_section
+    ini_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    state_path.write_text(
+        json.dumps({"owned_csurf_lines": wanted_surfaces}, indent=2), encoding="utf-8"
     )
 
-    # Only our own keys are rewritten; the user's existing csurf_* lines are preserved.
-    our_csurf_prefixes = (f"csurf_{http_idx}=", f"csurf_{osc_idx}=")
-    skip_prefixes = ("reascript=", "pythonlibdll64=", "pythonlibpath64=", "csurf_cnt=") + our_csurf_prefixes
-
-    injected_block = [
-        "reascript=1",
-        f"pythonlibpath64={py_dir}",
-        f"pythonlibdll64={py_dll}",
-        f"csurf_cnt={new_csurf_cnt}",
-        http_line,
-        osc_line,
-    ]
-
-    new_lines: list[str] = []
-    in_reaper_sec = False
-    injected_in_reaper = False
-    for line in raw_lines:
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            if in_reaper_sec and not injected_in_reaper:
-                new_lines.extend(injected_block)
-                injected_in_reaper = True
-            in_reaper_sec = stripped.lower() == "[reaper]"
-            new_lines.append(line)
-            continue
-
-        if in_reaper_sec and any(stripped.startswith(p) for p in skip_prefixes):
-            continue
-        new_lines.append(line)
-
-    if in_reaper_sec and not injected_in_reaper:
-        new_lines.extend(injected_block)
-
-    ini_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
     return {
         "status": "configured",
         "ini_path": str(ini_path),
         "backup_path": str(backup_path),
-        "http_control_url": f"http://127.0.0.1:{http_port}/_/",
-        "osc_endpoint": f"127.0.0.1:{osc_listen_port}",
-        "python_reascript_dll": py_dll,
-        "python_reascript_dir": py_dir,
+        "preserved_control_surfaces": len(kept_surfaces),
+        "osc_surface_enabled": enable_osc_surface,
+        "http_web_surface_enabled": enable_http_web_surface,
+        "http_control_url": f"http://127.0.0.1:{http_port}/_/" if enable_http_web_surface else None,
+        "osc_endpoint": f"127.0.0.1:{osc_listen_port}" if enable_osc_surface else None,
+        "warning": (
+            "REAPER's OSC/Web surfaces accept connections from the local network. Set a web "
+            "username:password in Preferences > Control/OSC/web and firewall these ports."
+            if wanted_surfaces
+            else None
+        ),
+        "python_reascript_dll": py_dll if enable_python_reascript else None,
+        "python_reascript_dir": py_dir if enable_python_reascript else None,
     }
 
 
@@ -496,6 +499,9 @@ def install_reaper_assets(
     reaper_resource_dir: str | Path | None = None,
     configure_ini_bridge: bool = False,
     enable_startup_daemon: bool = False,
+    *,
+    enable_osc_surface: bool = False,
+    enable_http_web_surface: bool = False,
 ) -> dict[str, Any]:
     """Install the complete Suavecito SoundBoost REAPER 7.82 integration suite:
     - `Effects/Suavecito/SoundBoost_18Band_Mastering_EQ_Monitor.jsfx` (`options:gmem=SuavecitoSoundBoost`)
@@ -504,7 +510,7 @@ def install_reaper_assets(
     - `Scripts/__startup.lua` hook so REAPER automatically runs the Live Bridge Daemon
     - `VideoPresets/Suavecito_SoundBoost_9x16_Canvas_Visualizer.txt`
     - 12 `.RfxChain` Genre Mastering FX Chains (`FXChains/Suavecito/SoundBoost_<genre>.RfxChain`)
-    - `REAPER.ini` HTTP (port 8080) + OSC (port 9000) + Python 3.13 ReaScript configuration
+    - `REAPER.ini` Python ReaScript configuration (OSC / Web surfaces only when explicitly enabled)
     """
     repo_root = Path(__file__).resolve().parent.parent
     src_jsfx = repo_root / "reaper" / "Effects" / "Suavecito" / "SoundBoost_18Band_Mastering_EQ_Monitor.jsfx"
@@ -556,12 +562,17 @@ def install_reaper_assets(
         if startup_lua.exists():
             existing = startup_lua.read_text(encoding="utf-8", errors="replace")
             if "Suavecito_Live_Bridge_Daemon.lua" not in existing:
+                shutil.copy2(startup_lua, startup_lua.with_name("__startup.lua.suavecito.bak"))
                 startup_lua.write_text(existing.rstrip() + "\n\n" + hook_snippet, encoding="utf-8")
         else:
             startup_lua.write_text(hook_snippet, encoding="utf-8")
 
     ini_result = (
-        configure_reaper_ini_bridge(target_root)
+        configure_reaper_ini_bridge(
+            target_root,
+            enable_osc_surface=enable_osc_surface,
+            enable_http_web_surface=enable_http_web_surface,
+        )
         if configure_ini_bridge
         else {"status": "skipped"}
     )
@@ -682,6 +693,9 @@ class ReaperLiveBridge:
         self.inbox_path = self.ipc_dir / "ipc_inbox.json"
         self.outbox_path = self.ipc_dir / "ipc_outbox.json"
         self.telemetry_path = self.ipc_dir / "telemetry.json"
+        # REAPER's web remote only speaks plain HTTP, so the bridge only ever talks to this machine.
+        if http_host.strip().lower() not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("ReaperLiveBridge only connects to REAPER on this machine (loopback).")
         self.http_base = f"http://{http_host}:{http_port}/_"
         self.osc_host = osc_host
         self.osc_port = osc_port
@@ -925,7 +939,7 @@ def _classify_stem_path(file_path: Path) -> dict[str, Any]:
 
 def generate_soundboost_rpp_project(
     output_rpp_path: str | Path,
-    stem_files: list[str | Path] | None = None,
+    stem_files: Sequence[str | Path] | None = None,
     stems_folder: str | Path | None = None,
     bpm: float = 120.0,
     time_sig_num: int = 4,
@@ -947,7 +961,7 @@ def generate_soundboost_rpp_project(
     target_platform: str = "spotify",
     add_drum_midi_triggers: bool = True,
     include_video_canvas_track: bool = True,
-    video_scenes: list[str | Path | dict[str, Any]] | None = None,
+    video_scenes: Sequence[str | Path | dict[str, Any]] | None = None,
     video_aspect: str = "9:16",
 ) -> dict[str, Any]:
     """Generate a complete, ready-to-open REAPER 7.82 `.RPP` multitrack session containing:
@@ -1002,7 +1016,7 @@ def generate_soundboost_rpp_project(
     if audit_target and audit_target.exists() and audit_target.suffix.lower() in {".wav", ".flac", ".aiff", ".mp3"}:
         try:
             raw_audit = analyze_audio_file(audit_target)
-            audit_report = raw_audit.to_dict() if hasattr(raw_audit, "to_dict") else dict(raw_audit)
+            audit_report = raw_audit.to_dict()
             target_ceil = STREAMING_TARGETS.get(target_platform, STREAMING_TARGETS["spotify"]).true_peak_ceiling_dbtp
             tp_db = float(audit_report.get("true_peak_dbtp", -90.0))
             tp_sec = float(audit_report.get("true_peak_time_sec", 0.0))
@@ -1213,8 +1227,9 @@ def generate_soundboost_rpp_project(
         for idx_s, vs in enumerate(video_scenes or []):
             if isinstance(vs, dict):
                 v_file = Path(str(vs.get("file") or vs.get("path") or "")).expanduser().resolve()
-                v_pos = float(vs.get("start_sec", cursor_sec))
-                v_len = float(vs.get("length_sec", vs.get("duration_sec", bar_sec * 2.0)))
+                v_start = vs.get("start_sec")
+                v_pos = float(v_start) if v_start is not None else cursor_sec
+                v_len = float(vs.get("length_sec") or vs.get("duration_sec") or bar_sec * 2.0)
                 v_name = str(vs.get("name") or f"Scene_{idx_s + 1:02d}_{v_file.name}")
             else:
                 v_file = Path(vs).expanduser().resolve()
@@ -1418,10 +1433,10 @@ def build_reaper_to_shoots_storyboard(
             and float(c.get("end_sec", c.get("end", t_end))) >= t_start
         ]
         active_lyrics = [
-            str(l.get("text", "")).strip()
-            for l in (lyrics or [])
-            if t_start <= float(l.get("start_sec", l.get("start", 0.0))) < t_end
-            and str(l.get("text", "")).strip()
+            str(ly.get("text", "")).strip()
+            for ly in (lyrics or [])
+            if t_start <= float(ly.get("start_sec", ly.get("start", 0.0))) < t_end
+            and str(ly.get("text", "")).strip()
         ]
 
         idx += 1
@@ -1529,11 +1544,16 @@ def render_reaper_video_pipeline(
     Karaoke Lyrics, and Title/Artist/ISRC HUD, plus optional `.RPP` project generation so the
     rendered video opens directly on REAPER's Video Timeline!
     """
-    import cv2
+    try:
+        import cv2
+        from PIL import Image, ImageDraw
+    except ImportError as exc:
+        raise ImportError(
+            "Video rendering needs the optional extra: pip install 'suavecitos-soundboost-toolkit[video]'"
+        ) from exc
     import numpy as np
     import scipy.signal as sg
     import soundfile as sf
-    from PIL import Image, ImageDraw
 
     src_audio = Path(audio_path).expanduser().resolve()
     if not src_audio.exists():
@@ -1587,7 +1607,7 @@ def render_reaper_video_pipeline(
         eq_gains = list(curve["eq_18band_db"])
 
     # Prepare optional background image or dark studio gradient
-    bg_bgr = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
+    bg_bgr: np.ndarray = np.zeros((frame_h, frame_w, 3), dtype=np.uint8)
     for y in range(frame_h):
         ratio = y / float(max(1, frame_h - 1))
         bg_bgr[y, :, 0] = int(28 + 20 * ratio)  # B
@@ -1603,7 +1623,7 @@ def render_reaper_video_pipeline(
             bg_bgr = (bg_bgr.astype(np.float32) * 0.45).astype(np.uint8)
 
     total_frames = max(1, round(render_sec * fps))
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
     writer = cv2.VideoWriter(str(out_mp4), fourcc, float(fps), (frame_w, frame_h))
 
     mono = np.mean(samples, axis=1)

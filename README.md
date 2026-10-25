@@ -40,12 +40,12 @@ Cloud features use your own SoundBoost account and plan. Nothing here unlocks an
 
 ## Quick start
 
-Requires **Python 3.11+**.
+Requires **Python 3.12+**.
 
 ```bash
 git clone https://github.com/The-40-Thieves/Suavecitos-Soundboost.AI-Toolkit.git
 cd Suavecitos-Soundboost.AI-Toolkit
-pip install -e .
+pip install -e ".[video]"   # drop [video] if you don't need the .mp4 renderer
 ```
 
 Then audit something. No account needed:
@@ -113,7 +113,7 @@ Run `soundboost --help` for the full list: `studio`, `converta`, `shoots`, `mv-b
 
 ## The MCP server
 
-Point any MCP client at it and your agent gets 22 tools for working with audio and SoundBoost.
+Point any MCP client at it and your agent gets 26 tools for working with audio and SoundBoost.
 
 ### Setup
 
@@ -132,15 +132,22 @@ Point any MCP client at it and your agent gets 22 tools for working with audio a
 
 If `soundboost-mcp` isn't on your PATH, use `"command": "python"` with `"args": ["/path/to/Suavecitos-Soundboost.AI-Toolkit/server.py"]`.
 
-For remote use, serve it over HTTP with OAuth in front:
+For remote use, serve it over HTTP with OAuth in front. Everyone who connects acts as the SoundBoost account signed in on that machine, so the server refuses to start until you say who's allowed in and which folders it may touch:
 
 ```bash
-soundboost serve-mcp --transport http --port 8000 --oauth google
+export SOUNDBOOST_ALLOWED_DIRS="$HOME/Music/releases"
+export SOUNDBOOST_MCP_ALLOWED_EMAILS="you@example.com"
+export SOUNDBOOST_MCP_OAUTH_CLIENT_ID="<your Google OAuth client ID>"
+export SOUNDBOOST_MCP_OAUTH_CLIENT_SECRET="<its secret>"
+export SOUNDBOOST_MCP_JWT_SIGNING_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+soundboost serve-mcp --transport http --host 0.0.0.0 --port 8000 --oauth google
 ```
+
+Without `--oauth`, HTTP only binds to `127.0.0.1`.
 
 ### It doesn't flood your context
 
-22 tool definitions is a lot of tokens to load into every conversation. So by default the server exposes only **4 entry tools**. Your agent unlocks the rest on demand, by searching for what it needs or by syncing to your SoundBoost plan so it sees exactly the tools you can actually use.
+26 tool definitions is a lot of tokens to load into every conversation. So by default the server exposes only **5 entry tools**. Your agent unlocks the rest on demand, by searching for what it needs or by syncing to your SoundBoost plan so it sees exactly the tools you can actually use.
 
 | Pack | What's inside | Plan |
 |---|---|---|
@@ -152,10 +159,13 @@ soundboost serve-mcp --transport http --port 8000 --oauth google
 | `mastering` | Cloud mastering, natural-language & voice mastering, before/after stats | Pay-as-you-go and up |
 | `music_video_shoots` | AI music video, Shoots director, text-to-audio, credit budgeting | Pay-as-you-go and up |
 | `bulk_mastering` | Album / EP batch mastering | Unlimited Plus, Director, Studio |
+| `account_admin` | Profile edits, checkout, pausing or resuming your subscription | Free |
 
 Want everything visible up front? `soundboost serve-mcp --discovery all`. Want a specific set? `--packs mastering,studio_stems`.
 
 Long-running jobs (mastering, stem splits, conversions) run as background tasks and stream progress back, so your agent isn't stuck staring at a spinner.
+
+Anything that deletes, signs you in or out, edits your REAPER config, or touches billing is its own tool marked *destructive*, so your MCP client asks before it runs. The read-only account tool can't change anything.
 
 ### Also included
 
@@ -181,9 +191,14 @@ That drops in:
 By default it only copies files. Live control is opt-in, because it touches your REAPER config:
 
 ```bash
-soundboost reaper-install --configure-bridge   # enable web control (port 8080) + OSC (port 9000) in REAPER.ini
+soundboost reaper-install --configure-bridge   # set up Python ReaScript in REAPER.ini
 soundboost reaper-install --enable-daemon      # auto-start the Live Bridge Daemon when REAPER launches
+soundboost reaper install --configure-bridge --enable-osc   # also turn on OSC (port 9000)
 ```
+
+Close REAPER first: it rewrites `REAPER.ini` on exit, so the toolkit won't edit the live config while it's running. Your existing control surfaces are kept, and `REAPER.ini` and `__startup.lua` are backed up before any change.
+
+OSC (`--enable-osc`) and the web remote (`--enable-web`, port 8080) are off unless you ask for them, because REAPER exposes both to your whole network and the web remote has no password by default. The Live Bridge Daemon doesn't need either.
 
 From there the toolkit can generate full `.RPP` sessions from your stems, build beat-locked storyboards from your arrangement, and render audio-reactive `.mp4` videos.
 
@@ -195,8 +210,21 @@ Sign in with `soundboost auth browser-login` and your token is stored in your OS
 
 | Variable | What it's for |
 |---|---|
-| `SOUNDBOOST_ACCESS_TOKEN` | Bearer token for cloud calls. Falls back to the keyring, then `~/.soundboost/credentials.json`. |
+| `SOUNDBOOST_ACCESS_TOKEN` | Bearer token for cloud calls. Falls back to the keyring. |
 | `SOUNDBOOST_GUEST_TOKEN` | Optional guest token for anonymous Studio sessions. |
+| `SOUNDBOOST_ALLOWED_DIRS` | Folders the MCP tools may read and write, separated by `;` on Windows or `:` elsewhere. Defaults to the current folder plus Music, Documents, Desktop, Downloads, and Videos. |
+| `SOUNDBOOST_GOOGLE_CLIENT_ID` / `SOUNDBOOST_GOOGLE_CLIENT_SECRET` | A Google "Desktop app" OAuth client for the **Continue with Google** button in `browser-login`. Without it you paste a SoundBoost token instead. |
+| `SOUNDBOOST_REAPER_ACTION_ALLOWLIST` | Extra REAPER action IDs the agent may trigger. By default only transport and save actions are allowed. |
+| `SOUNDBOOST_MCP_OAUTH_CLIENT_ID`, `SOUNDBOOST_MCP_OAUTH_CLIENT_SECRET`, `SOUNDBOOST_MCP_JWT_SIGNING_KEY`, `SOUNDBOOST_MCP_ALLOWED_EMAILS` | Required when serving over HTTP with `--oauth` (see above). |
+
+---
+
+## Security
+
+- **Your token stays in the OS keyring.** A plaintext `~/.soundboost/credentials.json` (readable only by you) is written only if no keyring works, and it's deleted the next time the keyring save succeeds. Status checks never show the token, and sign-in responses are scrubbed before your agent sees them.
+- **Browser sign-in** listens only on `127.0.0.1`, handles one sign-in, then shuts down. Every callback must carry a one-time `state` value, and requests from other hostnames are rejected.
+- **File access** from the MCP server is limited to `SOUNDBOOST_ALLOWED_DIRS`. Paths that climb out with `..`, follow a symlink elsewhere, point into hidden folders, or have the wrong file type are refused.
+- **Reporting a vulnerability:** see [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -212,13 +240,28 @@ For the curious. None of this is required reading.
 
 ---
 
+## Development
+
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install -e ".[video,dev]"   # .venv/bin/python on macOS/Linux
+ruff check .
+mypy
+pytest
+pip-audit --skip-editable
+```
+
+CI runs the same checks on Ubuntu and Windows for Python 3.12 and 3.13, and Dependabot opens weekly update PRs.
+
+---
+
 ## Project layout
 
 ```
 soundboost_toolkit/   CLI, MCP server, API client, OAuth, DSP, tagging, REAPER integration
 reaper/               JSFX effect, Lua scripts, video preset
 skills/               Agent skill file for this toolkit
-tests/                Test suite
+tests/                Test suite (including security regression tests)
 server.py             Direct entry point for MCP clients
 ```
 

@@ -76,6 +76,8 @@ class SoundBoostClient:
         self.cached_entitlements: dict[str, Any] | None = None
         self.storage_proxy_host: str | None = None
         self.storage_direct_host: str | None = None
+        # httpx drops the Authorization header when a redirect leaves the original origin.
+        self._http = httpx.Client(timeout=timeout_sec, follow_redirects=True)
 
     @staticmethod
     def _resolve_access_token(
@@ -248,9 +250,11 @@ class SoundBoostClient:
             return resolved
 
         billing_data: dict[str, Any] = {}
+        billing_verified = False
         if not self.account_tier:
             try:
                 billing_data = self.get_billing_info()
+                billing_verified = True
             except httpx.HTTPError:
                 billing_data = {}
 
@@ -258,6 +262,10 @@ class SoundBoostClient:
             billing_data,
             is_authenticated=True,
             override_tier=self.account_tier,
+        )
+        resolved["billing_verified"] = billing_verified
+        resolved["tier_source"] = (
+            "SOUNDBOOST_ACCOUNT_TIER" if self.account_tier else ("billing_api" if billing_verified else "unknown")
         )
         self.cached_entitlements = resolved
         return resolved
@@ -273,11 +281,13 @@ class SoundBoostClient:
         label = feature_label or endpoint or feature_key
         self.require_authenticated(label)
         ent = self.get_my_entitlements()
-        # If no local tier override and billing endpoint wasn't reachable yet, let the backend validate the Bearer JWT directly
-        if ent.get("raw_plan") == "free" and not self.account_tier and ent.get("subscription_status") == "free":
+        # The local check is a fast pre-flight only; SoundBoost's backend enforces the real gate.
+        # When the tier could not be determined (billing API unreachable, no override), defer to
+        # the backend instead of guessing, rather than blocking a possibly-paid account.
+        if ent.get("tier_source") == "unknown":
             return ent
         if not ent.get(feature_key, False):
-            current_tier = ent.get("tier", "free")
+            current_tier = ent.get("resolved_tier", "free")
             raise SoundBoostPayGateError(
                 f"Account tier '{current_tier}' does not unlock '{label}' (`{feature_key}=False`). "
                 "Upgrade your SoundBoost plan (`unlimited_plus`, `creator`, `director`, or `studio`) to unlock this feature."
@@ -305,27 +315,33 @@ class SoundBoostClient:
             extra_headers=extra_headers,
             include_json_content_type=include_json_ct,
         )
-        with httpx.Client(timeout=timeout_sec or self.timeout_sec, follow_redirects=True) as client:
-            resp = client.request(
-                method=method,
-                url=url,
-                params=params,
-                json=json_body,
-                files=files,
-                data=data,
-                headers=headers,
-            )
-            self._remember_storage_hosts(resp)
-            resp.raise_for_status()
-            if not resp.content:
-                return {}
-            content_type = resp.headers.get("content-type", "")
-            if "application/json" in content_type:
-                return resp.json()
-            try:
-                return resp.json()
-            except ValueError:
-                return {"raw_text": resp.text}
+        resp = self._http.request(
+            method=method,
+            url=url,
+            params=params,
+            json=json_body,
+            files=files,
+            data=data,
+            headers=headers,
+            timeout=timeout_sec or self.timeout_sec,
+        )
+        self._remember_storage_hosts(resp)
+        resp.raise_for_status()
+        if not resp.content:
+            return {}
+        try:
+            return resp.json()
+        except ValueError:
+            return {"raw_text": resp.text}
+
+    def close(self) -> None:
+        self._http.close()
+
+    def __enter__(self) -> SoundBoostClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     # -----------------------------------------------------------------------
     # 1. Authentication, Account, Products & SSO

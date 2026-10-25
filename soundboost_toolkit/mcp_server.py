@@ -19,6 +19,7 @@ from typing import Any
 
 import mcp.types as mcp_types
 from fastmcp import Context, FastMCP
+from fastmcp.server.middleware import AuthMiddleware
 from fastmcp.server.transforms import GetToolNext
 from fastmcp.server.transforms.catalog import CatalogTransform
 from fastmcp.server.transforms.search.base import (
@@ -77,7 +78,58 @@ from soundboost_toolkit.reaper_integration import (
     install_reaper_assets,
     render_reaper_video_pipeline,
 )
+from soundboost_toolkit.security import (
+    ALLOWED_DIRS_ENV,
+    ALLOWED_EMAILS_ENV,
+    AUDIO_EXTENSIONS,
+    HTML_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    RPP_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+    PathAccessError,
+    allowed_dirs_explicitly_configured,
+    allowed_emails,
+    email_allowlist_check,
+    is_loopback_host,
+    resolve_user_path,
+)
 from soundboost_toolkit.tagging import read_audio_tags, write_audio_tags
+
+# Default REAPER actions an MCP caller may trigger (transport and save only). Extend with
+# `SOUNDBOOST_REAPER_ACTION_ALLOWLIST` (comma-separated numeric IDs or `_NAMED` command IDs).
+DEFAULT_REAPER_ACTION_ALLOWLIST: frozenset[str] = frozenset(
+    {"1007", "1008", "1013", "1016", "1068", "40042", "40043", "40026", "40364", "50125"}
+)
+
+
+def _reaper_action_allowlist() -> set[str]:
+    extra = os.environ.get("SOUNDBOOST_REAPER_ACTION_ALLOWLIST", "")
+    return set(DEFAULT_REAPER_ACTION_ALLOWLIST) | {a.strip() for a in extra.split(",") if a.strip()}
+
+
+def _is_remote_url(value: str) -> bool:
+    return value.strip().lower().startswith(("https://", "http://"))
+
+
+def _optional_path(raw: str | None, **kwargs: Any) -> str | None:
+    return str(resolve_user_path(raw, **kwargs)) if raw else None
+
+
+def redact_login_result(res: dict[str, Any]) -> dict[str, Any]:
+    """Drop bearer/refresh tokens from a login response before it reaches the model."""
+    secret_keys = {"access", "access_token", "refresh", "refresh_token", "token", "id_token"}
+
+    def _scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                k: ("<stored in keyring>" if k in secret_keys else _scrub(v))
+                for k, v in value.items()
+            }
+        if isinstance(value, list):
+            return [_scrub(v) for v in value]
+        return value
+
+    return dict(_scrub(res))
 
 mcp = FastMCP(
     "suavecitos-soundboost-toolkit",
@@ -102,8 +154,8 @@ mcp.add_extension(
 class SoundBoostProgressiveDiscoveryTransform(CatalogTransform):
     """Progressive Tool Discovery & Context-Window Budget Manager for SoundBoost MCP.
 
-    Prevents agent context-window bloat by exposing only the 4 Pinned Entry Tools (`core` pack)
-    in `list_tools()` by default (~82% token reduction), while keeping all 22 tools:
+    Prevents agent context-window bloat by exposing only the 5 Pinned Entry Tools (`core` pack)
+    in `list_tools()` by default (~82% token reduction), while keeping all 26 tools:
     1. Searchable on demand via BM25 Okapi relevance ranking (`action='search'`) with compact Markdown schemas.
     2. Dynamically activatable/deactivatable by domain pack (`action='activate_pack'` / `'deactivate_pack'`)
        with `notifications/tools/list_changed`.
@@ -126,13 +178,13 @@ class SoundBoostProgressiveDiscoveryTransform(CatalogTransform):
         if self.mode == "all":
             names: set[str] = set()
             for spec in MCP_TOOL_PACKS.values():
-                names.update(str(t) for t in spec.get("tools", ()))  # type: ignore[arg-type]
+                names.update(spec["tools"])
             return names | self.active_tool_names
 
         visible: set[str] = set(self.active_tool_names)
         for pack_id in self.active_packs | {"core"}:
-            spec = MCP_TOOL_PACKS.get(pack_id, {})
-            visible.update(str(t) for t in spec.get("tools", ()))  # type: ignore[arg-type]
+            if pack_id in MCP_TOOL_PACKS:
+                visible.update(MCP_TOOL_PACKS[pack_id]["tools"])
         return visible
 
     async def transform_tools(self, tools: Sequence[Tool]) -> Sequence[Tool]:
@@ -289,7 +341,7 @@ async def soundboost_discover_tools(
     Keeps each agent's context window compact (~82% smaller initial `list_tools()`) by loading
     domain tool packs on demand or syncing visible tools to the user's exact SoundBoost account level:
     - `catalog`: List all 8 tool packs (`core`, `free_tools`, `studio_harmony`, `studio_stems`, `distribution`, `mastering`, `bulk_mastering`, `music_video_shoots`), their active state, tool names, and required tier.
-    - `search`: Search all 22 tools using BM25 Okapi natural-language ranking (`query`), returning compact Markdown (`~70%` fewer tokens) or JSON schemas and optionally auto-unlocking matched tools in `list_tools()`.
+    - `search`: Search all 26 tools using BM25 Okapi natural-language ranking (`query`), returning compact Markdown (`~70%` fewer tokens) or JSON schemas and optionally auto-unlocking matched tools in `list_tools()`.
     - `activate_pack`: Enable one or more tool packs (`pack='mastering'`, `'studio_stems,studio_harmony'`, or `'all'`) or individual `tool_names`, and notify the MCP client via `notifications/tools/list_changed`.
     - `deactivate_pack`: Unload one or more tool packs (`pack='mastering'`) or `tool_names` when a task phase finishes to shrink the context window.
     - `sync_account_tier`: Resolve the user's SoundBoost account tier (`free`, `pay_as_you_go`, `starter`, `unlimited`, `creator`, `director`, `unlimited_plus`, `studio`) and enable ONLY the tool packs unlocked for that tier.
@@ -302,7 +354,7 @@ async def soundboost_discover_tools(
         visible = PROGRESSIVE_DISCOVERY.get_visible_tool_names()
         packs_summary = {}
         for pack_id, spec in MCP_TOOL_PACKS.items():
-            pack_tools = list(spec.get("tools", ()))  # type: ignore[arg-type]
+            pack_tools = list(spec["tools"])
             packs_summary[pack_id] = {
                 "title": spec.get("title"),
                 "min_tier": spec.get("min_tier"),
@@ -315,7 +367,7 @@ async def soundboost_discover_tools(
             "discovery_mode": PROGRESSIVE_DISCOVERY.mode,
             "active_packs": sorted(PROGRESSIVE_DISCOVERY.active_packs),
             "visible_tool_count": len(visible),
-            "total_catalog_tools": sum(len(v.get("tools", ())) for v in MCP_TOOL_PACKS.values()),  # type: ignore[arg-type]
+            "total_catalog_tools": sum(len(v["tools"]) for v in MCP_TOOL_PACKS.values()),
             "visible_tools": sorted(visible),
             "packs": packs_summary,
         }
@@ -436,7 +488,8 @@ def audit_audio_loudness_and_release_readiness(file_path: str) -> dict[str, Any]
     4x oversampled True Peak (dBTP) with 100ms binary-search peak timestamp, stereo correlation,
     6-band spectral profile, 9-platform Streaming Loudness Penalty table, and DistroKid readiness check.
     """
-    return analyze_audio_file(file_path).to_dict()
+    path = resolve_user_path(file_path, must_exist=True, allowed_suffixes=AUDIO_EXTENSIONS)
+    return analyze_audio_file(path).to_dict()
 
 
 @mcp.tool(
@@ -451,7 +504,9 @@ def audit_audio_loudness_and_release_readiness(file_path: str) -> dict[str, Any]
 )
 def read_release_metadata_tags(file_path: str) -> dict[str, Any]:
     """Read ID3v2.3 / FLAC VorbisComment / WAV metadata tags including 12-char ISRC (TSRC), BPM, Key, Publisher, Lyrics, and Cover Art."""
-    return read_audio_tags(file_path)
+    return read_audio_tags(
+        resolve_user_path(file_path, must_exist=True, allowed_suffixes=AUDIO_EXTENSIONS)
+    )
 
 
 @mcp.tool(
@@ -459,7 +514,7 @@ def read_release_metadata_tags(file_path: str) -> dict[str, Any]:
     annotations=ToolAnnotations(
         title="Write Audio Release Metadata, ISRC & Cover Art",
         read_only_hint=False,
-        destructive_hint=False,
+        destructive_hint=True,
         idempotent_hint=True,
         open_world_hint=False,
     ),
@@ -480,9 +535,11 @@ def write_release_metadata_tags(
     lyrics: str | None = None,
     cover_art_path: str | None = None,
 ) -> dict[str, Any]:
-    """Write release metadata tags, ISO 3901 12-character ISRC (`TSRC`), unsynchronized lyrics (`USLT`), and front cover art (`APIC`) to MP3/FLAC/WAV."""
+    """Write release metadata tags, ISO 3901 12-character ISRC (`TSRC`), unsynchronized lyrics (`USLT`), and front cover art (`APIC`) to MP3/FLAC/WAV.
+    Existing tags in `file_path` are overwritten in place.
+    """
     return write_audio_tags(
-        file_path=file_path,
+        file_path=resolve_user_path(file_path, must_exist=True, allowed_suffixes=AUDIO_EXTENSIONS),
         title=title,
         artist=artist,
         album=album,
@@ -495,7 +552,9 @@ def write_release_metadata_tags(
         isrc=isrc,
         comment=comment,
         lyrics=lyrics,
-        cover_art_path=cover_art_path,
+        cover_art_path=_optional_path(
+            cover_art_path, must_exist=True, allowed_suffixes=IMAGE_EXTENSIONS
+        ),
     )
 
 
@@ -561,9 +620,11 @@ def generate_printable_lead_sheet(
     key_signature: str | None = None,
     bpm: float | None = None,
     output_html_path: str | None = None,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Merge word-level lyric segments and transposed chords (automatically inserting
     `[Instrumental]` chord rows when vocal gaps >= 3.0s) and generate a print-ready HTML Lead Sheet.
+    An existing `output_html_path` is only replaced when `overwrite=True`.
     """
     rows = build_lead_sheet_rows(
         lyrics_segments=lyrics_segments,
@@ -579,7 +640,9 @@ def generate_printable_lead_sheet(
     )
     saved_path: str | None = None
     if output_html_path:
-        out_p = Path(output_html_path).expanduser().resolve()
+        out_p = resolve_user_path(output_html_path, allowed_suffixes=HTML_EXTENSIONS)
+        if out_p.exists() and not overwrite:
+            raise FileExistsError(f"{out_p} already exists; pass overwrite=True to replace it.")
         out_p.parent.mkdir(parents=True, exist_ok=True)
         out_p.write_text(html_doc, encoding="utf-8")
         saved_path = str(out_p)
@@ -636,8 +699,9 @@ async def soundboost_upload_and_master(
     if act == "upload":
         if not file_path:
             raise ValueError("file_path is required for action='upload'")
-        await _notify_progress(ctx, 10.0, 100.0, f"Uploading {Path(file_path).name} to SoundBoost...")
-        res = await asyncio.to_thread(client.upload_audio, file_path)
+        upload_path = resolve_user_path(file_path, must_exist=True, allowed_suffixes=AUDIO_EXTENSIONS)
+        await _notify_progress(ctx, 10.0, 100.0, f"Uploading {upload_path.name} to SoundBoost...")
+        res = await asyncio.to_thread(client.upload_audio, upload_path)
         await _notify_progress(ctx, 100.0, 100.0, "Upload complete.")
         return res
 
@@ -853,7 +917,7 @@ async def soundboost_studio_chords_and_lyrics(
         title="Converta Hi-Res Audio Format & Dither Transcoder",
         read_only_hint=False,
         destructive_hint=False,
-        idempotent_hint=True,
+        idempotent_hint=False,
         open_world_hint=True,
     ),
 )
@@ -935,8 +999,7 @@ def soundboost_smart_links(
     - `create`: Create a new Smart Link
     - `update`: Update an existing Smart Link (`link_id` + `payload`)
     - `publish`: Publish a Smart Link to `https://soundboo.st/<publicId>`
-    - `archive`: Archive a Smart Link
-    - `delete`: Delete a Smart Link
+    Archiving and deleting live in `soundboost_remove_smart_link`.
     """
     client = SoundBoostClient()
     act = action.strip().lower()
@@ -954,11 +1017,28 @@ def soundboost_smart_links(
         return client.update_smart_link(link_id, payload or {})
     if act == "publish":
         return client.publish_smart_link(link_id)
-    if act == "archive":
-        return client.archive_smart_link(link_id)
-    if act == "delete":
-        return client.delete_smart_link(link_id)
     raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"cloud", "smart-links", "delete"},
+    annotations=ToolAnnotations(
+        title="Archive or Delete a SoundBoost Smart Link",
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
+    ),
+)
+def soundboost_remove_smart_link(link_id: str | int, mode: str = "archive") -> Any:
+    """Archive (`mode='archive'`, reversible) or permanently delete (`mode='delete'`) a Smart Link."""
+    client = SoundBoostClient()
+    m = mode.strip().lower()
+    if m == "archive":
+        return client.archive_smart_link(link_id)
+    if m == "delete":
+        return client.delete_smart_link(link_id)
+    raise ValueError("mode must be 'archive' or 'delete'")
 
 
 @mcp.tool(
@@ -1032,30 +1112,18 @@ async def soundboost_text_to_audio_and_mv_budget(
 
 @mcp.tool(
     tags={"oauth", "auth", "keyring", "vault"},
-    task=TaskConfig(mode="optional"),
     annotations=ToolAnnotations(
-        title="SoundBoost Google OAuth 2.0, OS Keyring Vault & Session Manager",
-        read_only_hint=False,
+        title="SoundBoost Sign-in Status & PKCE URL",
+        read_only_hint=True,
         destructive_hint=False,
         idempotent_hint=True,
-        open_world_hint=True,
+        open_world_hint=False,
     ),
 )
-async def soundboost_oauth_and_vault(
-    action: str = "status",
-    token_or_cookie: str | None = None,
-    email: str | None = None,
-    port: int = 8765,
-    timeout_sec: float = 120.0,
-    open_browser: bool = True,
-) -> dict[str, Any]:
-    """Manage SoundBoost OAuth 2.0, OS Keyring (`WinVaultKeyring`), and Inbound MCP OAuth 2.1:
-    - `status`: Check OS Keyring (`WinVaultKeyring`) and credential vault authentication status
-    - `pkce_url`: Generate RFC 7636 S256 PKCE Google OAuth 2.0 authorization URL (`716860248198-...`)
-    - `google_exchange`: Exchange a Google OAuth `id_token` / `access_token` at `POST /api/google-login/` and store the SoundBoost JWT in OS Keyring
-    - `save_token`: Save a SoundBoost Bearer JWT into OS Keyring
-    - `browser_handoff`: Launch local loopback OAuth callback server (`127.0.0.1:<port>/auth/callback`) to capture browser sign-in
-    - `logout`: Clear stored credentials from OS Keyring and `~/.soundboost/credentials.json`
+def soundboost_auth_status(action: str = "status", port: int = 8765) -> dict[str, Any]:
+    """Inspect SoundBoost sign-in state without changing it:
+    - `status`: Whether a SoundBoost token is available and where it comes from (never returns the token)
+    - `pkce_url`: Generate an RFC 7636 S256 PKCE Google authorization URL for the loopback flow
     """
     act = action.strip().lower()
     if act == "status":
@@ -1067,26 +1135,55 @@ async def soundboost_oauth_and_vault(
         return {
             "authorize_url": pkce.authorize_url,
             "redirect_uri": pkce.redirect_uri,
-            "state": pkce.state,
-            "code_challenge": pkce.code_challenge,
             "code_challenge_method": "S256",
         }
+    raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"oauth", "auth", "keyring", "vault"},
+    task=TaskConfig(mode="optional"),
+    annotations=ToolAnnotations(
+        title="SoundBoost Sign-in & Sign-out (OS Keyring)",
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+async def soundboost_oauth_and_vault(
+    action: str,
+    token: str | None = None,
+    email: str | None = None,
+    port: int = 8765,
+    timeout_sec: float = 120.0,
+    open_browser: bool = True,
+) -> dict[str, Any]:
+    """Change the stored SoundBoost credentials (replaces or removes the current sign-in):
+    - `browser_handoff`: Open a one-shot `127.0.0.1:<port>` sign-in page (Google, or paste a SoundBoost token) and store the result in the OS Keyring
+    - `google_exchange`: Exchange a Google `id_token` at `POST /api/google-login/` and store the SoundBoost JWT
+    - `save_token`: Store a SoundBoost Bearer JWT in the OS Keyring
+    - `logout`: Remove stored credentials from the OS Keyring and any fallback file
+    """
+    act = action.strip().lower()
     if act == "google_exchange":
-        if not token_or_cookie:
-            raise ValueError("token_or_cookie is required for action='google_exchange'")
+        if not token:
+            raise ValueError("token is required for action='google_exchange'")
         client = SoundBoostClient()
-        return await asyncio.to_thread(client.google_oauth_login, token_or_cookie, True)
+        res = await asyncio.to_thread(client.google_oauth_login, token, True)
+        return redact_login_result(res)
     if act == "save_token":
-        if not token_or_cookie:
-            raise ValueError("token_or_cookie is required for action='save_token'")
-        raw = token_or_cookie.strip()
-        return save_credentials_to_vault(raw, email=email, auth_method="manual_vault_save")
+        if not token:
+            raise ValueError("token is required for action='save_token'")
+        return save_credentials_to_vault(token.strip(), email=email, auth_method="manual_vault_save")
     if act == "browser_handoff":
+        client = SoundBoostClient()
         return await asyncio.to_thread(
             run_loopback_oauth_handoff,
             port,
             timeout_sec,
             open_browser,
+            exchange_google_id_token=lambda id_tok: client.google_oauth_login(id_tok, True),
         )
     if act == "logout":
         return clear_vault_credentials()
@@ -1098,8 +1195,8 @@ async def soundboost_oauth_and_vault(
     annotations=ToolAnnotations(
         title="REAPER 7.82 Deep Integration Suite (JSFX gmem, Live OSC/HTTP/IPC Bridge & .RPP Session Generator)",
         read_only_hint=False,
-        destructive_hint=False,
-        idempotent_hint=True,
+        destructive_hint=True,
+        idempotent_hint=False,
         open_world_hint=False,
     ),
 )
@@ -1135,14 +1232,17 @@ def install_reaper_jsfx_and_scripts(
     plan_tier: str = "director",
     configure_ini_bridge: bool = False,
     enable_startup_daemon: bool = False,
+    enable_osc_surface: bool = False,
+    enable_http_web_surface: bool = False,
 ) -> dict[str, Any]:
     """Deep REAPER 7.82 Integration & Video Pipeline Suite for Suavecito's SoundBoost.AI Toolkit:
     - `install` (default): Install `SoundBoost_18Band_Mastering_EQ_Monitor.jsfx` (`options:gmem=SuavecitoSoundBoost`),
       `Suavecito_SoundBoost_Stem_Import.lua`, `Suavecito_Live_Bridge_Daemon.lua`,
       `Suavecito_SoundBoost_9x16_Canvas_Visualizer.txt`, and 12 Genre `.RfxChain` files. The live bridge is
-      opt-in: set `configure_ini_bridge=True` to rewrite `REAPER.ini` for the HTTP Control Surface (port 8080),
-      UDP OSC (port 9000), and Python 3.13 ReaScript, and `enable_startup_daemon=True` to add the `__startup.lua`
-      auto-start hook. Both default to False so a bare install only copies assets.
+      opt-in: set `configure_ini_bridge=True` to set up Python ReaScript in `REAPER.ini` (add
+      `enable_osc_surface=True` / `enable_http_web_surface=True` for OSC port 9000 / web port 8080, which REAPER
+      exposes to the local network), and `enable_startup_daemon=True` to add the `__startup.lua` auto-start hook.
+      All default to False so a bare install only copies assets.
     - `inspect`: Forensically inspect running `reaper.exe` PID, `REAPER.ini`, installed VST3/CLAP/JSFX plugins, and live `gmem` telemetry.
     - `live_status`: Query live REAPER transport, beat position, track list, markers, and `gmem` telemetry via HTTP + IPC bridge.
     - `push_eq`: Push a live 18-band Mastering EQ curve (explicit `eq_18band_db`, `preset`, or natural-language `prompt`),
@@ -1154,19 +1254,54 @@ def install_reaper_jsfx_and_scripts(
     - `reaper_to_shoots_storyboard`: Analyze `audit_audio_path`, `bpm`, `chords`, and `lyrics` into bar-locked `Shoots` (`h3-max`) storyboard scenes with energy-driven camera motion, credit budget cap, and REAPER scene regions.
     - `render_video`: Render an audio-reactive `.mp4` (`output_mp4_path`, `video_mode` = `spotify_canvas_9x16` | `social_vertical_9x16` | `music_video_16x9`) with 18-Band Mastering EQ bars, Chords/Lyrics HUD, and optional companion `.RPP` (`output_rpp_path`).
     - `insert_video_scene`: Insert a video clip or image scene (`audit_audio_path` or first item in `video_scenes`) directly onto the live REAPER Video Track and open the REAPER Video Window.
-    - `run_action`: Trigger any native REAPER Action ID or named command (`reaper_action_id`).
+    - `run_action`: Trigger an allow-listed REAPER Action ID (transport/save by default; extend with `SOUNDBOOST_REAPER_ACTION_ALLOWLIST`).
+    `install` / `configure_bridge` modify REAPER's resource folder (`REAPER.ini`, `__startup.lua`), backing files up first.
     """
     act = action.strip().lower().replace("-", "_")
+    if reaper_resource_dir:
+        res_dir = Path(reaper_resource_dir).expanduser().resolve()
+        if not (res_dir / "REAPER.ini").is_file():
+            raise PathAccessError(f"'{res_dir}' is not a REAPER resource folder (no REAPER.ini).")
+        reaper_resource_dir = str(res_dir)
+    stems_folder = _optional_path(stems_folder, must_exist=True, directory=True)
+    stem_files = (
+        [str(resolve_user_path(f, must_exist=True, allowed_suffixes=AUDIO_EXTENSIONS)) for f in stem_files]
+        if stem_files
+        else None
+    )
+    output_rpp_path = _optional_path(output_rpp_path, allowed_suffixes=RPP_EXTENSIONS)
+    output_mp4_path = _optional_path(output_mp4_path, allowed_suffixes=VIDEO_EXTENSIONS)
+    if act == "insert_video_scene":
+        audit_audio_path = _optional_path(
+            audit_audio_path, must_exist=True, allowed_suffixes=VIDEO_EXTENSIONS | IMAGE_EXTENSIONS
+        )
+    else:
+        audit_audio_path = _optional_path(
+            audit_audio_path, must_exist=True, allowed_suffixes=AUDIO_EXTENSIONS
+        )
+    if video_scenes:
+        video_scenes = [
+            str(resolve_user_path(v, must_exist=True, allowed_suffixes=VIDEO_EXTENSIONS | IMAGE_EXTENSIONS))
+            if isinstance(v, str)
+            else v
+            for v in video_scenes
+        ]
     if act == "install":
         return install_reaper_assets(
             reaper_resource_dir,
             configure_ini_bridge=configure_ini_bridge,
             enable_startup_daemon=enable_startup_daemon,
+            enable_osc_surface=enable_osc_surface,
+            enable_http_web_surface=enable_http_web_surface,
         )
     if act == "inspect":
         return inspect_reaper_environment(reaper_resource_dir)
     if act == "configure_bridge":
-        return configure_reaper_ini_bridge(reaper_resource_dir)
+        return configure_reaper_ini_bridge(
+            reaper_resource_dir,
+            enable_osc_surface=enable_osc_surface,
+            enable_http_web_surface=enable_http_web_surface,
+        )
 
     bridge = ReaperLiveBridge(reaper_resource_dir=reaper_resource_dir)
     if act == "live_status":
@@ -1192,7 +1327,7 @@ def install_reaper_jsfx_and_scripts(
             raise ValueError("stems_folder is required for action='import_stems'")
         return bridge.dispatch_ipc_command(
             "import_stems",
-            {"stems_folder": str(Path(stems_folder).expanduser().resolve()), "add_drum_triggers": 1},
+            {"stems_folder": stems_folder, "add_drum_triggers": 1},
         )
     if act == "inject_isrc":
         tags: list[str] = []
@@ -1209,7 +1344,13 @@ def install_reaper_jsfx_and_scripts(
     if act == "run_action":
         if not reaper_action_id:
             raise ValueError("reaper_action_id is required for action='run_action'")
-        return bridge.dispatch_ipc_command("run_action", {"action_id": str(reaper_action_id)})
+        action_id = str(reaper_action_id).strip()
+        if action_id not in _reaper_action_allowlist():
+            raise PermissionError(
+                f"REAPER action '{action_id}' is not allow-listed. Add it to "
+                "SOUNDBOOST_REAPER_ACTION_ALLOWLIST to permit it."
+            )
+        return bridge.dispatch_ipc_command("run_action", {"action_id": action_id})
     if act == "generate_rpp":
         if not output_rpp_path:
             raise ValueError("output_rpp_path is required for action='generate_rpp'")
@@ -1452,7 +1593,8 @@ async def soundboost_youtube_and_soundcloud_ingest(
     if act == "studio_import_soundcloud":
         return await asyncio.to_thread(client.import_soundcloud_to_studio, url_or_path)
     if act == "studio_upload_original":
-        return await asyncio.to_thread(client.upload_studio_original, url_or_path)
+        upload_path = resolve_user_path(url_or_path, must_exist=True, allowed_suffixes=AUDIO_EXTENSIONS)
+        return await asyncio.to_thread(client.upload_studio_original, upload_path)
     raise ValueError(f"Unsupported action '{action}'")
 
 
@@ -1545,7 +1687,7 @@ async def soundboost_music_video_and_shoots_director(
             raise ValueError("audio_path is required for action='reaper_to_shoots_storyboard'")
         return await asyncio.to_thread(
             build_reaper_to_shoots_storyboard,
-            audio_path,
+            resolve_user_path(audio_path, must_exist=True, allowed_suffixes=AUDIO_EXTENSIONS),
             bpm=bpm,
             bars_per_scene=bars_per_scene,
             visual_style_prompt=director_message
@@ -1559,12 +1701,12 @@ async def soundboost_music_video_and_shoots_director(
         mode_str = "music_video_16x9" if "16:9" in aspect_ratio or "16x9" in aspect_ratio else "spotify_canvas_9x16"
         return await asyncio.to_thread(
             render_reaper_video_pipeline,
-            audio_path=audio_path,
-            output_mp4_path=output_mp4_path,
+            audio_path=resolve_user_path(audio_path, must_exist=True, allowed_suffixes=AUDIO_EXTENSIONS),
+            output_mp4_path=resolve_user_path(output_mp4_path, allowed_suffixes=VIDEO_EXTENSIONS),
             mode=mode_str,
             preset=preset,
             prompt=director_message,
-            output_rpp_path=output_rpp_path,
+            output_rpp_path=_optional_path(output_rpp_path, allowed_suffixes=RPP_EXTENSIONS),
             bpm=bpm,
         )
     if act == "shoots_sso_url":
@@ -1633,7 +1775,7 @@ async def soundboost_music_video_and_shoots_director(
         title="Studio Cloud Pitch/Time-Stretch Stem Export (Pay-Gated), Chord Voicings & Gapless MP3 Inspector",
         read_only_hint=False,
         destructive_hint=False,
-        idempotent_hint=True,
+        idempotent_hint=False,
         open_world_hint=True,
     ),
 )
@@ -1695,7 +1837,10 @@ async def studio_practice_voicings_and_cloud_shifter(
     if act == "inspect_gapless_mp3":
         if not input_path:
             raise ValueError("input_path is required for action='inspect_gapless_mp3'")
-        return await asyncio.to_thread(inspect_mp3_gapless_headers, input_path)
+        return await asyncio.to_thread(
+            inspect_mp3_gapless_headers,
+            resolve_user_path(input_path, must_exist=True, allowed_suffixes={".mp3"}),
+        )
     raise ValueError(f"Unsupported action '{action}'")
 
 
@@ -1727,8 +1872,7 @@ def soundboost_track_lifecycle_and_telemetry(
     - `update_cover_art`: Upload or assign cover art to a track (`POST /api/tracks/{id}/cover-art/`)
     - `public_link`: Create or toggle a shareable public link (`POST /api/tracks/{id}/public-link/`)
     - `public_tracks_by_ids`: Fetch public tracks by ID list (`GET /api/public/tracks/by-id/`)
-    - `delete_track`: Delete an uploaded source track (`POST /api/delete-track/`)
-    - `delete_mastered`: Delete a mastered track version (`POST /api/delete-mastered/`)
+    Deletions live in `soundboost_delete_tracks`.
     """
     client = SoundBoostClient()
     act = action.strip().lower()
@@ -1753,51 +1897,71 @@ def soundboost_track_lifecycle_and_telemetry(
     if act == "update_cover_art":
         if not image_path_or_url:
             raise ValueError("image_path_or_url is required for action='update_cover_art'")
-        return client.update_track_cover_art(track_id, image_path_or_url)
+        cover = (
+            image_path_or_url
+            if _is_remote_url(image_path_or_url)
+            else str(resolve_user_path(image_path_or_url, must_exist=True, allowed_suffixes=IMAGE_EXTENSIONS))
+        )
+        return client.update_track_cover_art(track_id, cover)
     if act == "public_link":
         return client.create_track_public_link(track_id, enabled=public_enabled)
-    if act == "delete_track":
-        return client.delete_track(track_id)
-    if act == "delete_mastered":
-        return client.delete_mastered_track(track_id)
     raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"cloud", "tracks", "delete"},
+    annotations=ToolAnnotations(
+        title="Delete SoundBoost Tracks or Mastered Versions",
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=True,
+        open_world_hint=True,
+    ),
+)
+def soundboost_delete_tracks(
+    track_id: str | int,
+    target: str = "mastered",
+) -> dict[str, Any]:
+    """Permanently delete a SoundBoost track:
+    - `target='mastered'`: Delete a mastered track version (`POST /api/delete-mastered/`)
+    - `target='source'`: Delete an uploaded source track (`POST /api/delete-track/`)
+    """
+    client = SoundBoostClient()
+    tgt = target.strip().lower()
+    if tgt == "mastered":
+        return client.delete_mastered_track(track_id)
+    if tgt in {"source", "track"}:
+        return client.delete_track(track_id)
+    raise ValueError("target must be 'mastered' or 'source'")
 
 
 @mcp.tool(
     tags={"cloud", "account", "profile", "notifications", "billing"},
     annotations=ToolAnnotations(
-        title="SoundBoost Artist Profile, Social Notifications & Subscription Billing Manager",
-        read_only_hint=False,
+        title="SoundBoost Artist Profile, Notifications & Billing (Read-only)",
+        read_only_hint=True,
         destructive_hint=False,
-        idempotent_hint=False,
+        idempotent_hint=True,
         open_world_hint=True,
     ),
 )
 def soundboost_account_profile_and_billing(
     action: str = "billing_info",
     username: str | None = None,
-    product_id: str | int | None = None,
-    notification_ids: list[str | int] | None = None,
-    payload: dict[str, Any] | None = None,
     page: int = 1,
 ) -> Any:
-    """Manage SoundBoost Artist Profile, Social Notifications, Referrals & Subscription Billing:
+    """Read SoundBoost account state (no changes are made):
     - `get_profile`: Fetch authenticated artist profile (`GET /api/account/profile/`)
-    - `update_profile`: Update authenticated artist profile (`PATCH /api/account/profile/`)
     - `check_username`: Check handle availability (`GET /api/account/profile/username-availability/`)
     - `public_profile`: Fetch public profile by username (`GET /api/public/profiles/{username}/`)
     - `notifications`: List social notifications (`GET /api/social/notifications/?page=`)
     - `unread_count`: Get unread notification count (`GET /api/social/notifications/unread-count/`)
-    - `mark_read`: Mark notifications read (`POST /api/social/notifications/read/`)
     - `billing_info`: Fetch subscription, credit balance & billing details (`GET /api/billing/info`)
-    - `entitlements`: Resolve the exact SoundBoost account level (`free`, `pay_as_you_go`, `unlimited`, `unlimited_plus`, `starter`, `creator`, `director`, `studio`) and unlocked feature matrix for the authenticated user
-    - `all_tiers`: Return the full SoundBoost account-level entitlement matrix (`ACCOUNT_TIER_ENTITLEMENTS`)
+    - `entitlements`: Resolve the exact SoundBoost account level and unlocked feature matrix
+    - `all_tiers`: Return the full SoundBoost account-level entitlement matrix
     - `products`: List available subscription plans & credit packs (`GET /api/products/`)
-    - `checkout_session`: Create Stripe checkout session (`POST /api/create-checkout-session`)
-    - `portal_session`: Create Stripe customer billing portal session (`POST /api/create-customer-portal-session/`)
-    - `pause_subscription`: Pause active subscription (`POST /api/pause-subscription/`)
-    - `resume_subscription`: Resume paused subscription (`POST /api/resume-subscription/`)
     - `referral_info`: Fetch artist referral link and reward stats (`GET /api/get-referral-info`)
+    Profile edits and subscription changes live in `soundboost_account_and_subscription_changes`.
     """
     client = SoundBoostClient()
     act = action.strip().lower()
@@ -1807,8 +1971,6 @@ def soundboost_account_profile_and_billing(
         return {"account_tier_entitlements": ACCOUNT_TIER_ENTITLEMENTS}
     if act == "get_profile":
         return client.get_account_profile()
-    if act == "update_profile":
-        return client.update_account_profile(payload or {})
     if act == "check_username":
         if not username:
             raise ValueError("username is required for action='check_username'")
@@ -1821,12 +1983,47 @@ def soundboost_account_profile_and_billing(
         return client.list_notifications(page=page)
     if act == "unread_count":
         return client.get_unread_notifications_count()
-    if act == "mark_read":
-        return client.mark_notifications_read(notification_ids)
     if act == "billing_info":
         return client.get_billing_info()
     if act == "products":
         return {"products": client.get_products()}
+    if act == "referral_info":
+        return client.get_referral_info()
+    raise ValueError(f"Unsupported action '{action}'")
+
+
+@mcp.tool(
+    tags={"cloud", "account", "billing", "subscription"},
+    annotations=ToolAnnotations(
+        title="Change SoundBoost Profile or Subscription",
+        read_only_hint=False,
+        destructive_hint=True,
+        idempotent_hint=False,
+        open_world_hint=True,
+    ),
+)
+def soundboost_account_and_subscription_changes(
+    action: str,
+    product_id: str | int | None = None,
+    notification_ids: list[str | int] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> Any:
+    """Make changes to the SoundBoost account. Confirm with the user before calling:
+    - `update_profile`: Update the artist profile (`PATCH /api/account/profile/`) with `payload`
+    - `mark_read`: Mark notifications read (`POST /api/social/notifications/read/`)
+    - `checkout_session`: Create a Stripe checkout session for `product_id` (`POST /api/create-checkout-session`)
+    - `portal_session`: Create a Stripe customer billing portal session
+    - `pause_subscription`: Pause the active subscription (`POST /api/pause-subscription/`)
+    - `resume_subscription`: Resume a paused subscription (`POST /api/resume-subscription/`)
+    """
+    client = SoundBoostClient()
+    act = action.strip().lower()
+    if act == "update_profile":
+        if not payload:
+            raise ValueError("payload is required for action='update_profile'")
+        return client.update_account_profile(payload)
+    if act == "mark_read":
+        return client.mark_notifications_read(notification_ids)
     if act == "checkout_session":
         if product_id is None:
             raise ValueError("product_id is required for action='checkout_session'")
@@ -1837,8 +2034,6 @@ def soundboost_account_profile_and_billing(
         return client.pause_subscription()
     if act == "resume_subscription":
         return client.resume_subscription()
-    if act == "referral_info":
-        return client.get_referral_info()
     raise ValueError(f"Unsupported action '{action}'")
 
 
@@ -1922,8 +2117,50 @@ def prompt_distrokid_release_workflow(track_path: str, genre: str = "pop", isrc:
     )
 
 
+def serve(
+    transport: str = "stdio",
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    oauth: str | None = None,
+) -> None:
+    """Run the server, refusing network exposures that would hand out the local SoundBoost account.
+
+    Over HTTP every caller acts as the account stored in this machine's keyring and can reach the
+    allowed directories, so HTTP requires: an explicit `SOUNDBOOST_ALLOWED_DIRS`, and either a
+    loopback bind or an inbound OAuth provider plus a `SOUNDBOOST_MCP_ALLOWED_EMAILS` allow-list.
+    """
+    mode = transport.strip().lower()
+    if mode == "stdio":
+        mcp.run(transport="stdio")
+        return
+
+    if not allowed_dirs_explicitly_configured():
+        raise RuntimeError(f"Set {ALLOWED_DIRS_ENV} before serving over {mode}.")
+    if oauth is not None:
+        mcp.auth = build_mcp_oauth_provider(oauth)
+    if mcp.auth is None:
+        if not is_loopback_host(host):
+            raise RuntimeError(
+                "Refusing to serve without inbound OAuth on a non-loopback host. "
+                "Use --host 127.0.0.1 or enable --oauth."
+            )
+    else:
+        if not allowed_emails():
+            raise RuntimeError(
+                f"Set {ALLOWED_EMAILS_ENV} to the e-mail addresses allowed to use this server."
+            )
+        mcp.add_middleware(AuthMiddleware(auth=email_allowlist_check))
+    if mode not in {"http", "sse", "streamable-http"}:
+        raise RuntimeError(f"Unsupported transport '{transport}'. Use stdio, http, sse or streamable-http.")
+    mcp.run(transport=mode, host=host, port=port)  # type: ignore[arg-type]
+
+
 def main() -> None:
-    mcp.run()
+    serve(
+        transport=os.environ.get("SOUNDBOOST_MCP_TRANSPORT", "stdio"),
+        host=os.environ.get("SOUNDBOOST_MCP_HOST", "127.0.0.1"),
+        port=int(os.environ.get("SOUNDBOOST_MCP_PORT", "8000")),
+    )
 
 
 if __name__ == "__main__":
