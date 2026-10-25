@@ -2111,7 +2111,7 @@ def prompt_distrokid_release_workflow(track_path: str, genre: str = "pop", isrc:
         "LRA (P95-P10), 4x oversampled True Peak (dBTP) + 100ms peak timestamp, stereo correlation, and high-frequency roll-off.\n"
         "2. If cymbal harshness or vocal/instrument imbalance is detected, use `soundboost_studio_stems_and_drums` "
         "(`hifi_6stem` + `start_drums` for Kick/Snare/Toms/Hi-Hat/Cymbals) or import into REAPER via `Suavecito_SoundBoost_Stem_Import.lua`.\n"
-        f"3. Render the 24-bit / 48 kHz master using `render_local_18band_master` (preset=`{genre}`, target_lufs=-14.0, true_peak_ceiling_dbtp=-1.0, bit_depth=24, apply_tpdf_dither=True).\n"
+        f"3. Master it with `soundboost_upload_and_master` (action=`upload` then `master`, mode=`preset`, preset=`{genre}`, target_lufs=-14.0, wait_for_completion=True) and download the 24-bit / 48 kHz WAV.\n"
         "4. Re-audit the mastered file with `audit_audio_loudness_and_release_readiness` to confirm `release_ready_heuristic == True`.\n"
         f"5. Embed release metadata and ISRC (`{isrc or 'CC-XXX-YY-NNNNN'}`) using `write_release_metadata_tags`."
     )
