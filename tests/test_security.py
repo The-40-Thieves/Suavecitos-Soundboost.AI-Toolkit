@@ -18,11 +18,13 @@ from types import SimpleNamespace
 from soundboost_toolkit import oauth
 from soundboost_toolkit.client import SoundBoostClient, SoundBoostPayGateError
 from soundboost_toolkit.mcp_server import (
+    _sandbox_video_scene,
     generate_printable_lead_sheet,
     install_reaper_jsfx_and_scripts,
     redact_login_result,
     serve,
 )
+from soundboost_toolkit.reaper_integration import _rpp_path, _rpp_text, generate_soundboost_rpp_project
 from soundboost_toolkit.security import (
     PathAccessError,
     email_allowlist_check,
@@ -96,6 +98,75 @@ class PathSandboxTests(unittest.TestCase):
                 reaper_resource_dir=str(self.root / "nope"), action="inspect"
             )
 
+
+
+class VideoSceneSandboxTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name).resolve()
+        self._env = unittest.mock.patch.dict(os.environ, {"SOUNDBOOST_ALLOWED_DIRS": str(self.root)})
+        self._env.start()
+        self.clip = self.root / "clip.mp4"
+        self.clip.write_bytes(b"x")
+
+    def tearDown(self) -> None:
+        self._env.stop()
+        self._tmp.cleanup()
+
+    def test_dict_scene_file_is_sandboxed(self) -> None:
+        out = _sandbox_video_scene({"path": str(self.clip), "name": "Intro", "start_sec": 1.0})
+        self.assertEqual(out, {"file": str(self.clip), "name": "Intro", "start_sec": 1.0})
+        with self.assertRaises(PathAccessError):
+            _sandbox_video_scene({"file": str(Path.home() / ".ssh" / "id_rsa.mp4")})
+        with self.assertRaises(PathAccessError):
+            _sandbox_video_scene({"file": str(self.root / ".." / "escape.mp4")})
+
+    def test_plain_string_scene_is_sandboxed(self) -> None:
+        self.assertEqual(_sandbox_video_scene(str(self.clip)), str(self.clip))
+        with self.assertRaises(PathAccessError):
+            _sandbox_video_scene(str(self.root / ".." / "escape.mp4"))
+
+    def test_media_paths_are_kept_exactly_or_rejected(self) -> None:
+        nbsp = "My\u00a0Clip.mp4"
+        self.assertEqual(_rpp_path(Path("C:/media") / nbsp), str(Path("C:/media") / nbsp))
+        self.assertEqual(_rpp_text(nbsp), nbsp)
+        for bad in ('a"b.mp4', "a\nb.mp4", "a\u2028b.mp4"):
+            with self.assertRaises(ValueError):
+                _rpp_path(bad)
+
+    @unittest.skipIf(os.name == "nt", "Windows filenames cannot contain double quotes")
+    def test_ddp_marker_fallback_uses_sanitized_filename(self) -> None:
+        out_rpp = self.root / 'odd".RPP'
+        generate_soundboost_rpp_project(output_rpp_path=out_rpp, isrc="US-ABC-26-00001")
+        lines = out_rpp.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(any("#odd'|ISRC=US-ABC-26-00001" in line for line in lines))
+        self.assertTrue(all(line.count('"') % 2 == 0 for line in lines))
+
+    def test_dict_scene_needs_a_file_and_a_video_suffix(self) -> None:
+        with self.assertRaises(ValueError):
+            _sandbox_video_scene({"name": "no file"})
+        bad = self.root / "notes.txt"
+        bad.write_text("x", encoding="utf-8")
+        with self.assertRaises(PathAccessError):
+            _sandbox_video_scene({"file": str(bad)})
+
+    def test_rpp_fields_cannot_break_out_of_quotes(self) -> None:
+        self.assertEqual(_rpp_text('a"b\r\n  <TRACK'), "a'b    <TRACK")
+        evil = 'x"\n  <TRACK\n    NAME "INJECTED"'
+        out_rpp = self.root / "s.RPP"
+        generate_soundboost_rpp_project(
+            output_rpp_path=out_rpp,
+            title=evil,
+            artist=evil,
+            isrc="US-ABC-26-00001\n  <TRACK",
+            chords=[{"chord": evil, "start_sec": 0.0, "end_sec": 1.0}],
+            lyrics=[{"text": evil, "start_sec": 0.5}],
+            video_scenes=[{"file": str(self.clip), "name": evil}],
+        )
+        lines = out_rpp.read_text(encoding="utf-8").splitlines()
+        self.assertFalse(any(line.strip().startswith('NAME "INJECTED') for line in lines))
+        self.assertFalse(any(line.strip() == "<TRACK" and "INJECTED" in nxt for line, nxt in zip(lines, lines[1:])))
+        self.assertTrue(all(line.count('"') % 2 == 0 for line in lines))
 
 class VaultTests(unittest.TestCase):
     def test_keyring_success_never_writes_plaintext(self) -> None:

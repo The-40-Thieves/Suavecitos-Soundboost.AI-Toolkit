@@ -31,6 +31,7 @@ import socket
 import struct
 import sys
 import time
+import unicodedata
 import uuid
 from collections.abc import Sequence
 from ctypes import wintypes
@@ -149,6 +150,32 @@ STEM_TRACK_METADATA: list[dict[str, Any]] = [
     {"match": "piano", "label": "Piano", "bus": "inst", "icon": "piano.png", "midi_note": None, "rgb": (163, 230, 53)},
     {"match": "other", "label": "Other", "bus": "inst", "icon": "synth.png", "midi_note": None, "rgb": (148, 163, 184)},
 ]
+
+
+def _rpp_text(value: object) -> str:
+    """Make a value safe inside an RPP double-quoted field: no quotes, no line breaks or control chars.
+
+    RPP is line-oriented, so a newline in a name would start a new chunk line (track, FX, ...).
+    """
+    text = str(value).replace('"', "'")
+    return "".join(" " if _breaks_rpp_line(ch) else ch for ch in text).strip()
+
+
+def _breaks_rpp_line(ch: str) -> bool:
+    # Control chars (incl. CR/LF/tab) and Unicode line/paragraph separators; other Unicode is kept.
+    return unicodedata.category(ch) in {"Cc", "Zl", "Zp"}
+
+
+def _rpp_path(path: object) -> str:
+    """Serialize a media path into an RPP FILE field without altering it.
+
+    Rewriting a path would point REAPER at a different (possibly existing) file, so a path that
+    cannot be written losslessly inside double quotes is rejected instead.
+    """
+    text = str(path)
+    if '"' in text or any(_breaks_rpp_line(ch) for ch in text):
+        raise ValueError(f"Media path cannot be written into an RPP session: {text!r}")
+    return text
 
 
 def _rgb_to_reaper_native(r: int, g: int, b: int) -> int:
@@ -1032,6 +1059,11 @@ def generate_soundboost_rpp_project(
             audit_report = None
             _ = exc
 
+    # Free-text inputs end up inside quoted RPP fields; strip anything that could break out of them.
+    title, artist, album, key_signature, isrc = (
+        _rpp_text(v) if v else v for v in (title, artist, album, key_signature, isrc)
+    )
+
     # Build Markers & Regions lines
     marker_lines: list[str] = []
     marker_id = 1
@@ -1045,7 +1077,7 @@ def generate_soundboost_rpp_project(
         ddp_index0 = "!00"
         marker_lines.append(f'  MARKER {marker_id} 0.0 "{ddp_index0}" 0 0 1 R')
         marker_id += 1
-        ddp_track = f"#{title or out_path.stem}"
+        ddp_track = f"#{title or _rpp_text(out_path.stem)}"
         if isrc:
             ddp_track += f"|ISRC={isrc}"
         if artist:
@@ -1075,7 +1107,7 @@ def generate_soundboost_rpp_project(
     region_id = 1
     if chords:
         for ch in chords:
-            c_name = str(ch.get("chord") or ch.get("symbol") or "N")
+            c_name = _rpp_text(ch.get("chord") or ch.get("symbol") or "N")
             c_start = float(ch.get("start_sec", ch.get("start", 0.0)))
             c_end = float(ch.get("end_sec", ch.get("end", c_start + 2.0)))
             col = _rgb_to_reaper_native(168, 85, 247)
@@ -1086,7 +1118,7 @@ def generate_soundboost_rpp_project(
     # Word-synced Lyric Markers
     if lyrics:
         for lyr in lyrics:
-            l_text = str(lyr.get("text", "")).replace('"', "'").strip()
+            l_text = _rpp_text(lyr.get("text", ""))
             l_start = float(lyr.get("start_sec", lyr.get("start", 0.0)))
             if l_text:
                 col = _rgb_to_reaper_native(244, 114, 182)
@@ -1172,7 +1204,7 @@ def generate_soundboost_rpp_project(
             is_last = i == len(items) - 1
             isbus_str = "2 -1" if is_last else "0 0"
             t_col = _rgb_to_reaper_native(*spec["rgb"])
-            t_name = f"{spec['label']} ({sf_path.name})"
+            t_name = _rpp_text(f"{spec['label']} ({sf_path.name})")
             ext_type = "MP3" if sf_path.suffix.lower() == ".mp3" else ("FLAC" if sf_path.suffix.lower() == ".flac" else "WAVE")
 
             fx_block = ""
@@ -1197,12 +1229,12 @@ def generate_soundboost_rpp_project(
                 f"{fx_block}"
                 "    <ITEM\n"
                 "      POSITION 0\n"
-                f'      NAME "{sf_path.name}"\n'
+                f'      NAME "{_rpp_text(sf_path.name)}"\n'
                 "      VOLPAN 1 0 1 -1\n"
                 "      SOFFS 0\n"
                 "      PLAYRATE 1 1 0 -1 0 0.0025\n"
                 f"      <SOURCE {ext_type}\n"
-                f'        FILE "{sf_path}"\n'
+                f'        FILE "{_rpp_path(sf_path)}"\n'
                 "      >\n"
                 "    >\n"
                 "  >"
@@ -1230,12 +1262,12 @@ def generate_soundboost_rpp_project(
                 v_start = vs.get("start_sec")
                 v_pos = float(v_start) if v_start is not None else cursor_sec
                 v_len = float(vs.get("length_sec") or vs.get("duration_sec") or bar_sec * 2.0)
-                v_name = str(vs.get("name") or f"Scene_{idx_s + 1:02d}_{v_file.name}")
+                v_name = _rpp_text(vs.get("name") or f"Scene_{idx_s + 1:02d}_{v_file.name}")
             else:
                 v_file = Path(vs).expanduser().resolve()
                 v_pos = cursor_sec
                 v_len = bar_sec * 2.0
-                v_name = f"Scene_{idx_s + 1:02d}_{v_file.name}"
+                v_name = _rpp_text(f"Scene_{idx_s + 1:02d}_{v_file.name}")
             cursor_sec = v_pos + v_len
             v_items_chunks.append(
                 "    <ITEM\n"
@@ -1246,7 +1278,7 @@ def generate_soundboost_rpp_project(
                 "      SOFFS 0\n"
                 "      PLAYRATE 1 1 0 -1 0 0.0025\n"
                 "      <SOURCE VIDEO\n"
-                f'        FILE "{v_file}"\n'
+                f'        FILE "{_rpp_path(v_file)}"\n'
                 "      >\n"
                 "    >\n"
             )
