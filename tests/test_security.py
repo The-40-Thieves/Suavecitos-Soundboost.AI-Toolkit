@@ -24,7 +24,7 @@ from soundboost_toolkit.mcp_server import (
     redact_login_result,
     serve,
 )
-from soundboost_toolkit.reaper_integration import _rpp_text, generate_soundboost_rpp_project
+from soundboost_toolkit.reaper_integration import _rpp_path, _rpp_text, generate_soundboost_rpp_project
 from soundboost_toolkit.security import (
     PathAccessError,
     email_allowlist_check,
@@ -120,6 +120,27 @@ class VideoSceneSandboxTests(unittest.TestCase):
             _sandbox_video_scene({"file": str(Path.home() / ".ssh" / "id_rsa.mp4")})
         with self.assertRaises(PathAccessError):
             _sandbox_video_scene({"file": str(self.root / ".." / "escape.mp4")})
+
+    def test_plain_string_scene_is_sandboxed(self) -> None:
+        self.assertEqual(_sandbox_video_scene(str(self.clip)), str(self.clip))
+        with self.assertRaises(PathAccessError):
+            _sandbox_video_scene(str(self.root / ".." / "escape.mp4"))
+
+    def test_media_paths_are_kept_exactly_or_rejected(self) -> None:
+        nbsp = "My\u00a0Clip.mp4"
+        self.assertEqual(_rpp_path(Path("C:/media") / nbsp), str(Path("C:/media") / nbsp))
+        self.assertEqual(_rpp_text(nbsp), nbsp)
+        for bad in ('a"b.mp4', "a\nb.mp4", "a\u2028b.mp4"):
+            with self.assertRaises(ValueError):
+                _rpp_path(bad)
+
+    @unittest.skipIf(os.name == "nt", "Windows filenames cannot contain double quotes")
+    def test_ddp_marker_fallback_uses_sanitized_filename(self) -> None:
+        out_rpp = self.root / 'odd".RPP'
+        generate_soundboost_rpp_project(output_rpp_path=out_rpp, isrc="US-ABC-26-00001")
+        lines = out_rpp.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(any("#odd'|ISRC=US-ABC-26-00001" in line for line in lines))
+        self.assertTrue(all(line.count('"') % 2 == 0 for line in lines))
 
     def test_dict_scene_needs_a_file_and_a_video_suffix(self) -> None:
         with self.assertRaises(ValueError):

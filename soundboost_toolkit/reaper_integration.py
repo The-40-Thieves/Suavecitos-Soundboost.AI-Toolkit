@@ -31,6 +31,7 @@ import socket
 import struct
 import sys
 import time
+import unicodedata
 import uuid
 from collections.abc import Sequence
 from ctypes import wintypes
@@ -157,7 +158,24 @@ def _rpp_text(value: object) -> str:
     RPP is line-oriented, so a newline in a name would start a new chunk line (track, FX, ...).
     """
     text = str(value).replace('"', "'")
-    return "".join(ch if ch.isprintable() else " " for ch in text).strip()
+    return "".join(" " if _breaks_rpp_line(ch) else ch for ch in text).strip()
+
+
+def _breaks_rpp_line(ch: str) -> bool:
+    # Control chars (incl. CR/LF/tab) and Unicode line/paragraph separators; other Unicode is kept.
+    return unicodedata.category(ch) in {"Cc", "Zl", "Zp"}
+
+
+def _rpp_path(path: object) -> str:
+    """Serialize a media path into an RPP FILE field without altering it.
+
+    Rewriting a path would point REAPER at a different (possibly existing) file, so a path that
+    cannot be written losslessly inside double quotes is rejected instead.
+    """
+    text = str(path)
+    if '"' in text or any(_breaks_rpp_line(ch) for ch in text):
+        raise ValueError(f"Media path cannot be written into an RPP session: {text!r}")
+    return text
 
 
 def _rgb_to_reaper_native(r: int, g: int, b: int) -> int:
@@ -1059,7 +1077,7 @@ def generate_soundboost_rpp_project(
         ddp_index0 = "!00"
         marker_lines.append(f'  MARKER {marker_id} 0.0 "{ddp_index0}" 0 0 1 R')
         marker_id += 1
-        ddp_track = f"#{title or out_path.stem}"
+        ddp_track = f"#{title or _rpp_text(out_path.stem)}"
         if isrc:
             ddp_track += f"|ISRC={isrc}"
         if artist:
@@ -1216,7 +1234,7 @@ def generate_soundboost_rpp_project(
                 "      SOFFS 0\n"
                 "      PLAYRATE 1 1 0 -1 0 0.0025\n"
                 f"      <SOURCE {ext_type}\n"
-                f'        FILE "{_rpp_text(sf_path)}"\n'
+                f'        FILE "{_rpp_path(sf_path)}"\n'
                 "      >\n"
                 "    >\n"
                 "  >"
@@ -1260,7 +1278,7 @@ def generate_soundboost_rpp_project(
                 "      SOFFS 0\n"
                 "      PLAYRATE 1 1 0 -1 0 0.0025\n"
                 "      <SOURCE VIDEO\n"
-                f'        FILE "{_rpp_text(v_file)}"\n'
+                f'        FILE "{_rpp_path(v_file)}"\n'
                 "      >\n"
                 "    >\n"
             )
