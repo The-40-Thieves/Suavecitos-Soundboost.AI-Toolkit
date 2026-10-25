@@ -122,13 +122,13 @@ class VaultTests(unittest.TestCase):
                 self.assertEqual(cred.stat().st_mode & 0o777, 0o600)
 
     def test_status_never_reveals_token(self) -> None:
-        with unittest.mock.patch.dict(os.environ, {"SOUNDBOOST_ACCESS_TOKEN": "secret-token-value-123456"}):
+        with unittest.mock.patch.dict(os.environ, {"SOUNDBOOST_ACCESS_TOKEN": "secret-token-value-123456"}):  # nosec B105 - test fixture
             status = oauth.get_vault_status()
         self.assertNotIn("secret", json.dumps(status))
         self.assertEqual(status["token_source"], "environment")
 
     def test_login_results_are_redacted(self) -> None:
-        red = redact_login_result({"access": "a", "user": {"email": "e", "refresh_token": "r"}})
+        red = redact_login_result({"access": "a", "user": {"email": "e", "refresh_token": "r"}})  # nosec B105 - test fixture
         self.assertNotIn('"a"', json.dumps(red))
         self.assertNotIn('"r"', json.dumps(red))
         self.assertEqual(red["user"]["email"], "e")
@@ -177,7 +177,7 @@ class LoopbackHandoffTests(unittest.TestCase):
             page = conn.getresponse().read().decode("utf-8")
             conn.close()
             state = page.split('name="state" value="', 1)[1].split('"', 1)[0]
-            body = urllib.parse.urlencode({"state": state, "session_token": "good-token"})
+            body = urllib.parse.urlencode({"state": state, "session_token": "good-token"})  # nosec B105 - test fixture
             self.assertEqual(self._request(port, "POST", "/auth/callback", body), 200)
             th.join(timeout=5)
             save.assert_called_once()
@@ -185,6 +185,27 @@ class LoopbackHandoffTests(unittest.TestCase):
             self.assertNotIn("good-token", json.dumps(out))
             self.assertNotIn("code_verifier", out)
 
+
+
+class GoogleExchangeTests(unittest.TestCase):
+    def _session(self, exchanger=None) -> oauth._LoopbackSession:  # type: ignore[no-untyped-def]
+        pkce = oauth.generate_google_pkce_challenge(client_id="cid")
+        return oauth._LoopbackSession(pkce, True, b"", set(), exchanger)
+
+    def test_exchange_failure_reports_error_type_only(self) -> None:
+        with unittest.mock.patch.object(oauth, "exchange_google_authorization_code", side_effect=ValueError("boom")):
+            out = oauth._complete_google_login(self._session(), "code")
+        self.assertEqual(out, {"status": "google_exchange_failed", "error": "ValueError"})
+
+    def test_missing_id_token_is_a_failure(self) -> None:
+        with unittest.mock.patch.object(oauth, "exchange_google_authorization_code", return_value={}):
+            out = oauth._complete_google_login(self._session(lambda _t: {"email": "x"}), "code")
+        self.assertEqual(out["status"], "google_exchange_failed")
+
+    def test_success_returns_email_not_tokens(self) -> None:
+        with unittest.mock.patch.object(oauth, "exchange_google_authorization_code", return_value={"id_token": "idt"}):
+            out = oauth._complete_google_login(self._session(lambda _t: {"user": {"email": "me@example.com"}}), "code")
+        self.assertEqual(out, {"status": "google_login_complete", "email": "me@example.com"})
 
 class InboundAccessTests(unittest.TestCase):
     def test_email_allowlist(self) -> None:
@@ -206,12 +227,12 @@ class InboundAccessTests(unittest.TestCase):
                 serve(transport="http", host="127.0.0.1")  # no allowed dirs
             with unittest.mock.patch.dict(os.environ, {"SOUNDBOOST_ALLOWED_DIRS": tempfile.gettempdir()}):
                 with self.assertRaises(RuntimeError):
-                    serve(transport="http", host="0.0.0.0")  # noqa: S104 - asserting it is refused
+                    serve(transport="http", host="0.0.0.0")  # noqa: S104 - asserting it is refused  # nosec B104 - test fixture
 
 
 class EntitlementGateTests(unittest.TestCase):
     def test_verified_free_account_is_blocked_from_plus_features(self) -> None:
-        client = SoundBoostClient(access_token="t")
+        client = SoundBoostClient(access_token="t")  # nosec B106 - test fixture
         with unittest.mock.patch.object(client, "get_billing_info", return_value={"plan": "free"}):
             with self.assertRaises(SoundBoostPayGateError):
                 client.require_feature_entitlement("studio_hifi_plus_stems_unlocked")

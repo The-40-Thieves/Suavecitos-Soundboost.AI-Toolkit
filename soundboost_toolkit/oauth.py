@@ -25,7 +25,7 @@ import threading
 import urllib.parse
 import webbrowser
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +73,7 @@ def _write_private_file(path: Path, content: str) -> None:
     """Write `content` to `path` readable/writable by the current user only."""
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.chmod(path.parent, 0o700)
+        os.chmod(path.parent, 0o700)  # nosemgrep -- owner-only directory, the minimum a dir needs
     except OSError:
         pass  # Windows ignores POSIX modes; the user-profile ACL still applies.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -322,6 +322,134 @@ def _landing_html(pkce: PKCEChallenge, google_enabled: bool) -> str:
 </html>"""
 
 
+@dataclass
+class _LoopbackSession:
+    """State shared between the loopback callback server and the thread waiting on it."""
+
+    pkce: PKCEChallenge
+    google_enabled: bool
+    landing_html: bytes
+    expected_hosts: set[str]
+    exchanger: Callable[[str], dict[str, Any]] | None
+    result: dict[str, Any] = field(default_factory=lambda: {"status": "timeout"})
+    done: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def state_ok(self, candidate: str) -> bool:
+        return bool(candidate) and hmac.compare_digest(candidate, self.pkce.state)
+
+
+class _LoopbackServer(http.server.HTTPServer):
+    def __init__(self, port: int, session: _LoopbackSession) -> None:
+        super().__init__((LOOPBACK_HOST, port), _LoopbackHandler)
+        self.session = session
+
+
+def _complete_google_login(session: _LoopbackSession, code: str) -> dict[str, Any]:
+    """Exchange a Google authorization code (PKCE) and hand the id_token to the SoundBoost exchanger."""
+    try:
+        google_tokens = exchange_google_authorization_code(session.pkce, code)
+        id_token = str(google_tokens.get("id_token") or "")
+        if not id_token:
+            raise ValueError("Google did not return an id_token")
+        if session.exchanger is None:
+            return {"status": "google_id_token_received_no_exchanger"}
+        login = session.exchanger(id_token)
+    except (httpx.HTTPError, ValueError) as exc:
+        return {"status": "google_exchange_failed", "error": type(exc).__name__}
+    return {"status": "google_login_complete", "email": login.get("email") or (login.get("user") or {}).get("email")}
+
+
+def _first(params: dict[str, list[str]], key: str) -> str:
+    return (params.get(key) or [""])[0].strip()
+
+
+class _LoopbackHandler(http.server.BaseHTTPRequestHandler):
+    server: _LoopbackServer
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002  # pylint: disable=redefined-builtin
+        return
+
+    @property
+    def session(self) -> _LoopbackSession:
+        return self.server.session
+
+    def _reply(self, status: int, body: bytes, content_type: str = "text/plain") -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _route(self) -> str | None:
+        """Host check and routing shared by GET and POST; replies and returns None on rejection."""
+        if (self.headers.get("Host") or "").strip().lower() not in self.session.expected_hosts:
+            self._reply(403, b"Forbidden host.")
+            return None
+        path = urllib.parse.urlparse(self.path).path
+        if path not in {"/", "/auth/callback"}:
+            self._reply(404, b"Not found.")
+            return None
+        return path
+
+    def _finish(self, outcome: dict[str, Any]) -> None:
+        s = self.session
+        with s.lock:
+            if s.done.is_set():
+                self._reply(409, b"This sign-in session is already complete.")
+                return
+            s.result.clear()
+            s.result.update(outcome)
+            s.done.set()
+        ok = outcome.get("status") in {"saved", "google_login_complete"}
+        msg = b"<h2>Signed in. You may close this tab.</h2>" if ok else b"<h2>Sign-in failed. Check the terminal for details.</h2>"
+        self._reply(200 if ok else 400, msg, "text/html")
+
+    def do_GET(self) -> None:
+        path = self._route()
+        if path is None:
+            return
+        if path == "/":
+            self._reply(200, self.session.landing_html, "text/html")
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if not self.session.state_ok(_first(qs, "state")):
+            self._reply(400, b"Invalid or missing OAuth state parameter.")
+            return
+        if qs.get("error"):
+            self._finish({"status": "google_error", "error": qs["error"][0][:200]})
+            return
+        code = _first(qs, "code")
+        if not code or not self.session.google_enabled:
+            self._reply(400, b"Missing authorization code.")
+            return
+        self._finish(_complete_google_login(self.session, code))
+
+    def do_POST(self) -> None:
+        path = self._route()
+        if path is None:
+            return
+        if path != "/auth/callback":
+            self._reply(405, b"Method not allowed.")
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > MAX_FORM_BYTES:
+            self._reply(413, b"Invalid request size.")
+            return
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        if not self.session.state_ok(_first(form, "state")):
+            self._reply(400, b"Invalid or missing OAuth state parameter.")
+            return
+        raw_sess = _first(form, "session_token")
+        if not raw_sess:
+            self._reply(400, b"Missing token.")
+            return
+        self._finish({"status": "saved", "vault": save_credentials_to_vault(raw_sess, auth_method="loopback_handoff")})
+
+
 def run_loopback_oauth_handoff(
     port: int = 8765,
     timeout_sec: float = 120.0,
@@ -339,127 +467,27 @@ def run_loopback_oauth_handoff(
     is included in the returned result.
     """
     google_enabled = _loopback_google_client_id() is not None
-    redirect_uri = _loopback_url(port, "/auth/callback")
-    pkce = generate_google_pkce_challenge(redirect_uri=redirect_uri)
-    landing_html = _landing_html(pkce, google_enabled).encode("utf-8")
-    expected_hosts = {f"{LOOPBACK_HOST}:{port}", f"localhost:{port}"}
-    result: dict[str, Any] = {"status": "timeout"}
-    done_event = threading.Event()
-    lock = threading.Lock()
-
-    def _state_ok(candidate: str) -> bool:
-        return bool(candidate) and hmac.compare_digest(candidate, pkce.state)
-
-    class _CallbackHandler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, log_format: str, *args: Any) -> None:
-            return
-
-        def _reply(self, status: int, body: bytes, content_type: str = "text/plain") -> None:
-            self.send_response(status)
-            self.send_header("Content-Type", f"{content_type}; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Referrer-Policy", "no-referrer")
-            self.send_header("X-Frame-Options", "DENY")
-            self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'")
-            self.end_headers()
-            self.wfile.write(body)
-
-        def _host_ok(self) -> bool:
-            return (self.headers.get("Host") or "").strip().lower() in expected_hosts
-
-        def _finish(self, outcome: dict[str, Any]) -> None:
-            with lock:
-                if done_event.is_set():
-                    self._reply(409, b"This sign-in session is already complete.")
-                    return
-                result.clear()
-                result.update(outcome)
-                done_event.set()
-            ok = outcome.get("status") in {"saved", "google_login_complete"}
-            msg = (
-                b"<h2>Signed in. You may close this tab.</h2>"
-                if ok
-                else b"<h2>Sign-in failed. Check the terminal for details.</h2>"
-            )
-            self._reply(200 if ok else 400, msg, "text/html")
-
-        def do_GET(self) -> None:
-            if not self._host_ok():
-                self._reply(403, b"Forbidden host.")
-                return
-            parsed = urllib.parse.urlparse(self.path)
-            if parsed.path == "/":
-                self._reply(200, landing_html, "text/html")
-                return
-            if parsed.path != "/auth/callback":
-                self._reply(404, b"Not found.")
-                return
-
-            qs = urllib.parse.parse_qs(parsed.query)
-            if not _state_ok((qs.get("state") or [""])[0]):
-                self._reply(400, b"Invalid or missing OAuth state parameter.")
-                return
-            if qs.get("error"):
-                self._finish({"status": "google_error", "error": qs["error"][0][:200]})
-                return
-            code = (qs.get("code") or [""])[0].strip()
-            if not code or not google_enabled:
-                self._reply(400, b"Missing authorization code.")
-                return
-            try:
-                google_tokens = exchange_google_authorization_code(pkce, code)
-                id_token = str(google_tokens.get("id_token") or "")
-                if not id_token:
-                    raise ValueError("Google did not return an id_token")
-                if exchange_google_id_token is None:
-                    self._finish({"status": "google_id_token_received_no_exchanger"})
-                    return
-                login = exchange_google_id_token(id_token)
-                self._finish(
-                    {
-                        "status": "google_login_complete",
-                        "email": login.get("email") or (login.get("user") or {}).get("email"),
-                    }
-                )
-            except (httpx.HTTPError, ValueError) as exc:
-                self._finish({"status": "google_exchange_failed", "error": type(exc).__name__})
-
-        def do_POST(self) -> None:
-            if not self._host_ok():
-                self._reply(403, b"Forbidden host.")
-                return
-            if urllib.parse.urlparse(self.path).path != "/auth/callback":
-                self._reply(404, b"Not found.")
-                return
-            length = int(self.headers.get("Content-Length") or 0)
-            if length <= 0 or length > MAX_FORM_BYTES:
-                self._reply(413, b"Invalid request size.")
-                return
-            form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
-            if not _state_ok((form.get("state") or [""])[0]):
-                self._reply(400, b"Invalid or missing OAuth state parameter.")
-                return
-            raw_sess = (form.get("session_token") or [""])[0].strip()
-            if not raw_sess:
-                self._reply(400, b"Missing token.")
-                return
-            vault_res = save_credentials_to_vault(raw_sess, auth_method="loopback_handoff")
-            self._finish({"status": "saved", "vault": vault_res})
-
-    server = http.server.HTTPServer((LOOPBACK_HOST, port), _CallbackHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    pkce = generate_google_pkce_challenge(redirect_uri=_loopback_url(port, "/auth/callback"))
+    session = _LoopbackSession(
+        pkce=pkce,
+        google_enabled=google_enabled,
+        landing_html=_landing_html(pkce, google_enabled).encode("utf-8"),
+        expected_hosts={f"{LOOPBACK_HOST}:{port}", f"localhost:{port}"},
+        exchanger=exchange_google_id_token,
+    )
+    server = _LoopbackServer(port, session)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     local_url = _loopback_url(port)
     if open_browser:
         webbrowser.open(local_url)
 
     try:
-        done_event.wait(timeout=timeout_sec)
+        session.done.wait(timeout=timeout_sec)
     finally:
         server.shutdown()
         server.server_close()
 
-    return {"local_handoff_url": local_url, "google_sign_in_enabled": google_enabled, **result}
+    return {"local_handoff_url": local_url, "google_sign_in_enabled": google_enabled, **session.result}
 
 
 # ---------------------------------------------------------------------------
