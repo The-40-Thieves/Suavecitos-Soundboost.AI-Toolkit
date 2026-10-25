@@ -227,7 +227,7 @@ def _loopback_google_client_id() -> str | None:
 
 
 def generate_google_pkce_challenge(
-    redirect_uri: str = f"http://{LOOPBACK_HOST}:8765/auth/callback",
+    redirect_uri: str = f"http://{LOOPBACK_HOST}:8765/auth/callback",  # NOSONAR: RFC 8252 loopback redirect, never leaves 127.0.0.1
     client_id: str | None = None,
     scopes: list[str] | None = None,
 ) -> PKCEChallenge:
@@ -332,7 +332,7 @@ def run_loopback_oauth_handoff(
     is included in the returned result.
     """
     google_enabled = _loopback_google_client_id() is not None
-    redirect_uri = f"http://{LOOPBACK_HOST}:{port}/auth/callback"
+    redirect_uri = f"http://{LOOPBACK_HOST}:{port}/auth/callback"  # NOSONAR: RFC 8252 loopback redirect, never leaves 127.0.0.1
     pkce = generate_google_pkce_challenge(redirect_uri=redirect_uri)
     landing_html = _landing_html(pkce, google_enabled).encode("utf-8")
     expected_hosts = {f"{LOOPBACK_HOST}:{port}", f"localhost:{port}"}
@@ -442,7 +442,7 @@ def run_loopback_oauth_handoff(
     server = http.server.HTTPServer((LOOPBACK_HOST, port), _CallbackHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    local_url = f"http://{LOOPBACK_HOST}:{port}/"
+    local_url = f"http://{LOOPBACK_HOST}:{port}/"  # NOSONAR: RFC 8252 loopback redirect, never leaves 127.0.0.1
     if open_browser:
         webbrowser.open(local_url)
 
