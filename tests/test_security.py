@@ -203,7 +203,7 @@ class GoogleExchangeTests(unittest.TestCase):
         self.assertEqual(out["status"], "google_exchange_failed")
 
     def test_success_returns_email_not_tokens(self) -> None:
-        with unittest.mock.patch.object(oauth, "exchange_google_authorization_code", return_value={"id_token": "idt"}):
+        with unittest.mock.patch.object(oauth, "exchange_google_authorization_code", return_value={"id_token": "idt"}):  # nosec B105 - test fixture
             out = oauth._complete_google_login(self._session(lambda _t: {"user": {"email": "me@example.com"}}), "code")
         self.assertEqual(out, {"status": "google_login_complete", "email": "me@example.com"})
 
@@ -240,7 +240,7 @@ class EntitlementGateTests(unittest.TestCase):
     def test_unknown_tier_defers_to_backend(self) -> None:
         import httpx
 
-        client = SoundBoostClient(access_token="t")
+        client = SoundBoostClient(access_token="t")  # nosec B106 - test fixture
         with unittest.mock.patch.object(client, "get_billing_info", side_effect=httpx.ConnectError("down")):
             ent = client.require_feature_entitlement("studio_hifi_plus_stems_unlocked")
         self.assertEqual(ent["tier_source"], "unknown")
