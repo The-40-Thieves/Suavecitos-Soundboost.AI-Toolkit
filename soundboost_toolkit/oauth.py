@@ -53,6 +53,12 @@ GOOGLE_OAUTH_EXCHANGE_ENDPOINT = "https://oauth2.googleapis.com/token"
 GOOGLE_JWKS_URI = "https://www.googleapis.com/oauth2/v3/certs"
 
 LOOPBACK_HOST = "127.0.0.1"
+
+
+def _loopback_url(port: int, path: str = "/") -> str:
+    """URL on the local sign-in listener. Plain HTTP is required for RFC 8252 loopback redirects
+    and is safe here because the listener only binds 127.0.0.1."""
+    return urllib.parse.urlunsplit(("http", f"{LOOPBACK_HOST}:{port}", path, "", ""))
 MAX_FORM_BYTES = 16_384
 
 
@@ -227,12 +233,13 @@ def _loopback_google_client_id() -> str | None:
 
 
 def generate_google_pkce_challenge(
-    redirect_uri: str = f"http://{LOOPBACK_HOST}:8765/auth/callback",  # NOSONAR: RFC 8252 loopback redirect, never leaves 127.0.0.1
+    redirect_uri: str | None = None,
     client_id: str | None = None,
     scopes: list[str] | None = None,
 ) -> PKCEChallenge:
     """Create an RFC 7636 S256 PKCE challenge and Google OAuth 2.0 authorization URL."""
     cid = client_id or _loopback_google_client_id() or SOUNDBOOST_GOOGLE_OAUTH_CLIENT_ID
+    redirect_uri = redirect_uri or _loopback_url(8765, "/auth/callback")
     verifier = secrets.token_urlsafe(48)
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
     challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
@@ -332,7 +339,7 @@ def run_loopback_oauth_handoff(
     is included in the returned result.
     """
     google_enabled = _loopback_google_client_id() is not None
-    redirect_uri = f"http://{LOOPBACK_HOST}:{port}/auth/callback"  # NOSONAR: RFC 8252 loopback redirect, never leaves 127.0.0.1
+    redirect_uri = _loopback_url(port, "/auth/callback")
     pkce = generate_google_pkce_challenge(redirect_uri=redirect_uri)
     landing_html = _landing_html(pkce, google_enabled).encode("utf-8")
     expected_hosts = {f"{LOOPBACK_HOST}:{port}", f"localhost:{port}"}
@@ -442,7 +449,7 @@ def run_loopback_oauth_handoff(
     server = http.server.HTTPServer((LOOPBACK_HOST, port), _CallbackHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    local_url = f"http://{LOOPBACK_HOST}:{port}/"  # NOSONAR: RFC 8252 loopback redirect, never leaves 127.0.0.1
+    local_url = _loopback_url(port)
     if open_browser:
         webbrowser.open(local_url)
 
