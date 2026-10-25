@@ -428,6 +428,7 @@ def render_18band_master(
     true_peak_ceiling_dbtp: float = -1.0,
     bit_depth: int = 24,
     apply_tpdf_dither: bool = True,
+    dither_seed: int = 0x5B,
 ) -> dict[str, Any]:
     """Apply SoundBoost's 18-Band Mastering EQ, Mid/Side Stereo Width, LUFS Gain, True-Peak Limiter & TPDF Dither."""
     in_file = _validate_audio_path(input_path)
@@ -514,7 +515,8 @@ def render_18band_master(
     # 6. TPDF Dithering (for 16-bit or 24-bit integer output)
     if apply_tpdf_dither and bit_depth in (16, 24):
         lsb = 1.0 / float(1 << (bit_depth - 1))
-        rng = np.random.default_rng()
+        # Seeded so identical inputs render byte-identical masters; dither needs no unpredictability.
+        rng = np.random.default_rng(dither_seed)
         tpdf_noise = (rng.uniform(-0.5, 0.5, size=processed.shape) + rng.uniform(-0.5, 0.5, size=processed.shape)) * lsb
         processed = np.clip(processed + tpdf_noise, -1.0, 1.0 - lsb)
 
@@ -646,7 +648,7 @@ def build_lead_sheet_rows(
     prefer_flats: bool = False,
 ) -> list[dict[str, Any]]:
     """Merge word-level lyrics and transposed chords with 3.0s instrumental gap rows (Module 548)."""
-    transposed_chords = [
+    transposed_chords: list[dict[str, Any]] = [
         {
             "start": float(c.get("start", 0.0)),
             "end": float(c.get("end", 0.0)),
@@ -1008,6 +1010,9 @@ def get_chord_voicing_diagram(
         or shape_db.get(f"{flat_root}{quality}")
     )
 
+    frets: tuple[int, ...]
+    fingers: tuple[int, ...]
+    barres: tuple[int, ...]
     if shape is None:
         # Procedural barre/movable voicing fallback
         is_minor = quality.startswith("m") and not quality.startswith("maj")
@@ -1031,10 +1036,10 @@ def get_chord_voicing_diagram(
             fingers = (1, 1, 1, 4)
             barres = (offset,) if offset > 0 else ()
     else:
-        frets = tuple(int(x) for x in shape["frets"])  # type: ignore[index]
-        fingers = tuple(int(x) for x in shape["fingers"])  # type: ignore[index]
-        base = int(shape["base_fret"])  # type: ignore[arg-type]
-        barres = tuple(int(x) for x in shape["barres"])  # type: ignore[index]
+        frets = tuple(int(x) for x in shape["frets"])
+        fingers = tuple(int(x) for x in shape["fingers"])
+        base = int(shape["base_fret"])
+        barres = tuple(int(x) for x in shape["barres"])
 
     sounding_midi = [
         open_m + f for open_m, f in zip(open_midi, frets, strict=True) if f >= 0

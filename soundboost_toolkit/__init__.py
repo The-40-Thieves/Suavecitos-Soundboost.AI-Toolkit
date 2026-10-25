@@ -4,5 +4,5 @@ Master, split, tag, and ship your tracks from the terminal, your AI agent, or RE
 Unofficial CLI + MCP server for SoundBoost.ai, built with their permission.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = ["__version__"]

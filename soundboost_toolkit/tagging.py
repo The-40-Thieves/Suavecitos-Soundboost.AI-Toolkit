@@ -178,6 +178,7 @@ def write_audio_tags(
         fl.save()
         return read_audio_tags(path)
 
+    audio_obj: Any
     if ext == ".mp3":
         audio_obj = MP3(str(path))
         if audio_obj.tags is None:

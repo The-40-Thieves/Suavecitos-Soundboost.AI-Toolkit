@@ -19,6 +19,18 @@ local inbox_path = ipc_dir .. "/ipc_inbox.json"
 local outbox_path = ipc_dir .. "/ipc_outbox.json"
 local telemetry_path = ipc_dir .. "/telemetry.json"
 
+-- Only these REAPER actions may be triggered through the mailbox (transport + save + video window),
+-- matching DEFAULT_REAPER_ACTION_ALLOWLIST in mcp_server.py. Any process that can write
+-- ipc_inbox.json can reach this daemon, so anything else must be opted into from inside REAPER:
+-- set ExtState "Suavecito" / "ExtraActionAllowlist" to a comma-separated list of IDs.
+local allowed_actions = {
+  ["1007"] = true, ["1008"] = true, ["1013"] = true, ["1016"] = true, ["1068"] = true,
+  ["40042"] = true, ["40043"] = true, ["40026"] = true, ["40364"] = true, ["50125"] = true,
+}
+for extra in (r.GetExtState("Suavecito", "ExtraActionAllowlist") or ""):gmatch("[^,%s]+") do
+  allowed_actions[extra] = true
+end
+
 local last_seq_id = ""
 local tick_counter = 0
 
@@ -295,7 +307,9 @@ local function handle_inbox_command(raw)
 
   elseif cmd == "run_action" then
     local action_id = extract_json_string(raw, "action_id") or ""
-    if action_id ~= "" then
+    if action_id ~= "" and not allowed_actions[action_id] then
+      detail_msg = "rejected_action_not_allowlisted"
+    elseif action_id ~= "" then
       local num_id = tonumber(action_id)
       if not num_id then
         num_id = r.NamedCommandLookup(action_id)

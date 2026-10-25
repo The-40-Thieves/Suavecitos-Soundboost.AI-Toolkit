@@ -152,16 +152,17 @@ class SoundBoostToolkitTests(unittest.TestCase):
 
         async def _verify_mcp() -> None:
             async with Client(mcp) as client:
-                # 1. Verify default Progressive Discovery mode starts with only the 4 Pinned Entry Tools (~83% context reduction)
+                # 1. Verify default Progressive Discovery mode starts with only the 5 Pinned Entry Tools
                 await client.call_tool("soundboost_discover_tools", {"action": "reset"})
                 initial_tools = await client.list_tools()
-                self.assertEqual(len(initial_tools), 4)
+                self.assertEqual(len(initial_tools), 5)
                 initial_names = {t.name for t in initial_tools}
                 self.assertEqual(
                     initial_names,
                     {
                         "soundboost_discover_tools",
                         "audit_audio_loudness_and_release_readiness",
+                        "soundboost_auth_status",
                         "soundboost_oauth_and_vault",
                         "soundboost_account_profile_and_billing",
                     },
@@ -183,14 +184,14 @@ class SoundBoostToolkitTests(unittest.TestCase):
                     {"action": "activate_pack", "pack": "mastering"},
                 )
                 mastering_pack_tools = await client.list_tools()
-                self.assertEqual(len(mastering_pack_tools), 7)  # 4 core + 3 mastering
+                self.assertEqual(len(mastering_pack_tools), 9)  # 5 core + 4 mastering
 
                 await client.call_tool(
                     "soundboost_discover_tools",
                     {"action": "sync_account_tier", "account_tier": "free"},
                 )
                 free_tier_tools = {t.name for t in await client.list_tools()}
-                self.assertEqual(len(free_tier_tools), 16)
+                self.assertEqual(len(free_tier_tools), 19)
                 self.assertNotIn("soundboost_upload_and_master", free_tier_tools)
                 self.assertNotIn("soundboost_bulk_and_album_mastering", free_tier_tools)
 
@@ -199,21 +200,21 @@ class SoundBoostToolkitTests(unittest.TestCase):
                     {"action": "sync_account_tier", "account_tier": "unlimited"},
                 )
                 unlim_tier_tools = {t.name for t in await client.list_tools()}
-                self.assertEqual(len(unlim_tier_tools), 21)
+                self.assertEqual(len(unlim_tier_tools), 25)
                 self.assertIn("soundboost_upload_and_master", unlim_tier_tools)
                 self.assertNotIn("soundboost_bulk_and_album_mastering", unlim_tier_tools)
 
-                # 4. Unlock all 22 tools ('studio' tier / pack='all') and verify annotations on every tool
+                # 4. Unlock all 26 tools ('studio' tier / pack='all') and verify annotations on every tool
                 await client.call_tool(
                     "soundboost_discover_tools",
                     {"action": "activate_pack", "pack": "all"},
                 )
                 tools = await client.list_tools()
-                self.assertEqual(len(tools), 22)
+                self.assertEqual(len(tools), 26)
                 tool_map = {t.name: t for t in tools}
                 self.assertNotIn("render_local_18band_master", tool_map)
 
-                # Verify ToolAnnotations on all 22 tools
+                # Verify ToolAnnotations on all 26 tools
                 for t in tools:
                     self.assertIsNotNone(t.annotations, f"Missing annotations on {t.name}")
                     self.assertTrue(bool(t.annotations.title), f"Missing title on {t.name}")
@@ -228,6 +229,23 @@ class SoundBoostToolkitTests(unittest.TestCase):
                 self.assertTrue(tool_map["soundboost_music_video_and_shoots_director"].annotations.open_world_hint)
                 self.assertTrue(tool_map["studio_practice_voicings_and_cloud_shifter"].annotations.open_world_hint)
 
+                # Every tool that can delete data, change credentials, or touch billing is flagged destructive
+                for name in (
+                    "soundboost_oauth_and_vault",
+                    "soundboost_account_and_subscription_changes",
+                    "soundboost_delete_tracks",
+                    "soundboost_remove_smart_link",
+                    "write_release_metadata_tags",
+                    "install_reaper_jsfx_and_scripts",
+                ):
+                    self.assertTrue(tool_map[name].annotations.destructive_hint, name)
+                for name in ("soundboost_auth_status", "soundboost_account_profile_and_billing"):
+                    self.assertTrue(tool_map[name].annotations.read_only_hint, name)
+                # Read-only tools must not expose any mutating action
+                billing_doc = tool_map["soundboost_account_profile_and_billing"].description or ""
+                for forbidden in ("pause_subscription", "checkout_session", "update_profile"):
+                    self.assertNotIn(f"`{forbidden}`:", billing_doc)
+
                 # Verify MCP Resources & Prompts
                 resources = await client.list_resources()
                 uris = {str(r.uri) for r in resources}
@@ -240,11 +258,11 @@ class SoundBoostToolkitTests(unittest.TestCase):
                 prompt_names = {p.name for p in prompts}
                 self.assertIn("distrokid_release_mastering_workflow", prompt_names)
 
-                # Reset back to 4 core tools and verify hidden tools remain directly callable by name
+                # Reset back to 5 core tools and verify hidden tools remain directly callable by name
                 await client.call_tool("soundboost_discover_tools", {"action": "reset"})
-                self.assertEqual(len(await client.list_tools()), 4)
+                self.assertEqual(len(await client.list_tools()), 5)
 
-                oauth_res = await client.call_tool("soundboost_oauth_and_vault", {"action": "pkce_url"})
+                oauth_res = await client.call_tool("soundboost_auth_status", {"action": "pkce_url"})
                 self.assertFalse(oauth_res.is_error)
 
                 voicings_res = await client.call_tool(
@@ -441,10 +459,16 @@ class SoundBoostToolkitTests(unittest.TestCase):
         self.assertIn("keyring_backend", status)
 
         self.assertIsNone(build_mcp_oauth_provider("none"))
+        signing_key = "k" * 48
+        with self.assertRaises(ValueError):
+            build_mcp_oauth_provider("google", client_id="test-client-id.apps.googleusercontent.com")
+        with self.assertRaises(ValueError):
+            build_mcp_oauth_provider("jwt")
         google_prov = build_mcp_oauth_provider(
             "google",
             base_url="http://127.0.0.1:8000",
             client_id="test-client-id.apps.googleusercontent.com",
+            jwt_signing_key=signing_key,
         )
         self.assertIsNotNone(google_prov)
         jwt_prov = build_mcp_oauth_provider(
@@ -457,6 +481,7 @@ class SoundBoostToolkitTests(unittest.TestCase):
             "oauth_proxy",
             base_url="http://127.0.0.1:8000",
             client_id="test-client-id",
+            jwt_signing_key=signing_key,
         )
         self.assertIsNotNone(proxy_prov)
         remote_prov = build_mcp_oauth_provider(
@@ -483,11 +508,28 @@ class SoundBoostToolkitTests(unittest.TestCase):
             fake_ini = tmp_path / "REAPER.ini"
             fake_ini.write_text("[reaper]\nmixeruiflags=11\n[verchk]\nlastt=1\n", encoding="utf-8")
 
-            # INI-bridge and startup daemon are now opt-in; this test exercises them explicitly.
+            fake_ini.write_text(
+                "[reaper]\nmixeruiflags=11\ncsurf_cnt=1\ncsurf_0=MCU 0 1 2 0 0\n[verchk]\nlastt=1\n",
+                encoding="utf-8",
+            )
+            # INI-bridge and startup daemon are opt-in; this test exercises them explicitly.
             inst = install_reaper_assets(
-                tmp_path, configure_ini_bridge=True, enable_startup_daemon=True
+                tmp_path,
+                configure_ini_bridge=True,
+                enable_startup_daemon=True,
+                enable_osc_surface=True,
+                enable_http_web_surface=True,
             )
             self.assertEqual(inst["status"], "installed")
+            self.assertEqual(inst["ini_bridge"]["preserved_control_surfaces"], 1)
+            ini_text = fake_ini.read_text(encoding="utf-8")
+            self.assertIn("csurf_0=MCU 0 1 2 0 0", ini_text)
+            self.assertIn("csurf_cnt=3", ini_text)
+            # Re-running replaces only the surfaces the toolkit owns
+            install_reaper_assets(
+                tmp_path, configure_ini_bridge=True, enable_osc_surface=True, enable_http_web_surface=True
+            )
+            self.assertIn("csurf_cnt=3", fake_ini.read_text(encoding="utf-8"))
             self.assertEqual(inst["installed_fxchains_count"], 12)
             self.assertTrue((tmp_path / "Scripts" / "__startup.lua").exists())
             self.assertTrue((tmp_path / "Scripts" / "Suavecito" / "Suavecito_Live_Bridge_Daemon.lua").exists())

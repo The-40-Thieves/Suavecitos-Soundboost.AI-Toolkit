@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, TypedDict
 
 # ---------------------------------------------------------------------------
 # Subdomain Base URLs
@@ -453,7 +453,23 @@ CHORD_QUALITY_INTERVALS: Final[dict[str, tuple[int, ...]]] = {
 
 # Standard Guitar 6-string open-position voicing templates: (E2, A2, D3, G3, B3, E4)
 # -1 = muted string, 0 = open string
-GUITAR_CHORD_SHAPES: Final[dict[str, dict[str, object]]] = {
+class ChordShape(TypedDict):
+    frets: tuple[int, ...]
+    fingers: tuple[int, ...]
+    base_fret: int
+    barres: tuple[int, ...]
+
+
+class ToolPack(TypedDict):
+    pack_id: str
+    title: str
+    min_tier: str
+    always_pinned: bool
+    summary: str
+    tools: tuple[str, ...]
+
+
+GUITAR_CHORD_SHAPES: Final[dict[str, ChordShape]] = {
     "C": {"frets": (-1, 3, 2, 0, 1, 0), "fingers": (0, 3, 2, 0, 1, 0), "base_fret": 1, "barres": ()},
     "Cm": {"frets": (-1, 3, 5, 5, 4, 3), "fingers": (0, 1, 3, 4, 2, 1), "base_fret": 3, "barres": (3,)},
     "C7": {"frets": (-1, 3, 2, 3, 1, 0), "fingers": (0, 3, 2, 4, 1, 0), "base_fret": 1, "barres": ()},
@@ -490,7 +506,7 @@ GUITAR_CHORD_SHAPES: Final[dict[str, dict[str, object]]] = {
 }
 
 # Standard Ukulele 4-string voicing templates: (G4, C4, E4, A4)
-UKULELE_CHORD_SHAPES: Final[dict[str, dict[str, object]]] = {
+UKULELE_CHORD_SHAPES: Final[dict[str, ChordShape]] = {
     "C": {"frets": (0, 0, 0, 3), "fingers": (0, 0, 0, 3), "base_fret": 1, "barres": ()},
     "Cm": {"frets": (0, 3, 3, 3), "fingers": (0, 1, 2, 3), "base_fret": 1, "barres": ()},
     "C7": {"frets": (0, 0, 0, 1), "fingers": (0, 0, 0, 1), "base_fret": 1, "barres": ()},
@@ -517,7 +533,7 @@ UKULELE_CHORD_SHAPES: Final[dict[str, dict[str, object]]] = {
 # ---------------------------------------------------------------------------
 # Progressive MCP Tool Discovery Packs & Account-Tier Pack Mapping
 # ---------------------------------------------------------------------------
-MCP_TOOL_PACKS: Final[dict[str, dict[str, object]]] = {
+MCP_TOOL_PACKS: Final[dict[str, ToolPack]] = {
     "core": {
         "pack_id": "core",
         "title": "Pinned Entry & Discovery Pack",
@@ -527,6 +543,7 @@ MCP_TOOL_PACKS: Final[dict[str, dict[str, object]]] = {
         "tools": (
             "soundboost_discover_tools",
             "audit_audio_loudness_and_release_readiness",
+            "soundboost_auth_status",
             "soundboost_oauth_and_vault",
             "soundboost_account_profile_and_billing",
         ),
@@ -577,6 +594,7 @@ MCP_TOOL_PACKS: Final[dict[str, dict[str, object]]] = {
         "summary": "Artist link-in-bio Smart Links (`soundboo.st/<slug>`) with auto-scraped DSP links and release metadata.",
         "tools": (
             "soundboost_smart_links",
+            "soundboost_remove_smart_link",
         ),
     },
     "mastering": {
@@ -589,6 +607,7 @@ MCP_TOOL_PACKS: Final[dict[str, dict[str, object]]] = {
             "soundboost_upload_and_master",
             "soundboost_voice_and_prompt_assistant",
             "soundboost_track_lifecycle_and_telemetry",
+            "soundboost_delete_tracks",
         ),
     },
     "bulk_mastering": {
@@ -612,18 +631,28 @@ MCP_TOOL_PACKS: Final[dict[str, dict[str, object]]] = {
             "soundboost_text_to_audio_and_mv_budget",
         ),
     },
+    "account_admin": {
+        "pack_id": "account_admin",
+        "title": "Account Profile Edits & Subscription Billing Changes Pack",
+        "min_tier": "free",
+        "always_pinned": False,
+        "summary": "Destructive account changes: profile edits, Stripe checkout/portal sessions, and pausing or resuming the subscription.",
+        "tools": (
+            "soundboost_account_and_subscription_changes",
+        ),
+    },
 }
 
 # Exact MCP Tool Packs unlocked by each SoundBoost account level
 TIER_UNLOCKED_MCP_PACKS: Final[dict[str, tuple[str, ...]]] = {
-    "free": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution"),
-    "pay_as_you_go": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "music_video_shoots"),
-    "starter": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "music_video_shoots"),
-    "unlimited": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "music_video_shoots"),
-    "creator": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "music_video_shoots"),
-    "director": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "bulk_mastering", "music_video_shoots"),
-    "unlimited_plus": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "bulk_mastering", "music_video_shoots"),
-    "studio": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "mastering", "bulk_mastering", "music_video_shoots"),
+    "free": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "account_admin"),
+    "pay_as_you_go": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "account_admin", "mastering", "music_video_shoots"),
+    "starter": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "account_admin", "mastering", "music_video_shoots"),
+    "unlimited": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "account_admin", "mastering", "music_video_shoots"),
+    "creator": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "account_admin", "mastering", "music_video_shoots"),
+    "director": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "account_admin", "mastering", "bulk_mastering", "music_video_shoots"),
+    "unlimited_plus": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "account_admin", "mastering", "bulk_mastering", "music_video_shoots"),
+    "studio": ("core", "free_tools", "studio_harmony", "studio_stems", "distribution", "account_admin", "mastering", "bulk_mastering", "music_video_shoots"),
 }
 
 
