@@ -1,5 +1,7 @@
 # Suavecito's SoundBoost.ai Toolkit
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/The-40-Thieves/Suavecitos-Soundboost.AI-Toolkit?utm_source=badge)
+
 **Master, split, tag, and ship your tracks from the terminal, your AI agent, or straight out of REAPER.**
 
 A CLI, an MCP server, and a REAPER suite for [SoundBoost.ai](https://soundboost.ai), plus a local DSP engine that does the release-prep grunt work offline for free.
@@ -252,6 +254,8 @@ pip-audit --skip-editable
 ```
 
 CI runs the same checks on Ubuntu and Windows for Python 3.12 and 3.13, and Dependabot opens weekly update PRs.
+
+Performance benchmarks for the DSP engine and the chord/grid/tagging helpers live in `tests/benchmarks/` and are tracked by [CodSpeed](https://codspeed.io) on every PR. Run them locally with `pytest tests/benchmarks --codspeed`.
 
 ---
 
