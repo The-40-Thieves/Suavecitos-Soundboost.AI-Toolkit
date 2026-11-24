@@ -319,6 +319,33 @@ local function handle_inbox_command(raw)
         detail_msg = "ran_action_" .. tostring(num_id)
       end
     end
+
+  elseif cmd == "ai_stem_split" or cmd == "vocal_to_midi" or cmd == "auto_vocal_chain" or cmd == "whisper_dialogue_markers" then
+    local script_map = {
+      ai_stem_split = "Suavecito_AI_Stem_Split.lua",
+      vocal_to_midi = "Suavecito_Vocal_To_MIDI.lua",
+      auto_vocal_chain = "Suavecito_Auto_Vocal_Chain.lua",
+      whisper_dialogue_markers = "Suavecito_Whisper_Dialogue_Markers.lua",
+    }
+    local script_file = resource_path .. "/Scripts/Suavecito/" .. script_map[cmd]
+    local f = io.open(script_file, "r")
+    if f then
+      f:close()
+      r.SetExtState("Suavecito", "HeadlessMode", "1", false)
+      r.SetExtState("Suavecito", "LastScriptError", "", false)
+      local ok, err = pcall(dofile, script_file)
+      r.SetExtState("Suavecito", "HeadlessMode", "0", false)
+      local script_err = r.GetExtState("Suavecito", "LastScriptError") or ""
+      if not ok then
+        detail_msg = "error_" .. script_map[cmd] .. ":" .. tostring(err)
+      elseif script_err ~= "" then
+        detail_msg = "failed_" .. script_map[cmd] .. ":" .. script_err
+      else
+        detail_msg = "executed_" .. script_map[cmd]
+      end
+    else
+      detail_msg = "missing_" .. script_map[cmd]
+    end
   end
 
   local telem = collect_telemetry_json()

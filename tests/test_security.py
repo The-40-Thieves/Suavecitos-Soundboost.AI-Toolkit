@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import socket
 import tempfile
 import threading
@@ -18,13 +19,19 @@ from types import SimpleNamespace
 from soundboost_toolkit import oauth
 from soundboost_toolkit.client import SoundBoostClient, SoundBoostPayGateError
 from soundboost_toolkit.mcp_server import (
+    DEFAULT_REAPER_ACTION_ALLOWLIST,
     _sandbox_video_scene,
     generate_printable_lead_sheet,
     install_reaper_jsfx_and_scripts,
     redact_login_result,
     serve,
 )
-from soundboost_toolkit.reaper_integration import _rpp_path, _rpp_text, generate_soundboost_rpp_project
+from soundboost_toolkit.reaper_integration import (
+    REAPER_AI_LUA_SCRIPTS,
+    _rpp_path,
+    _rpp_text,
+    generate_soundboost_rpp_project,
+)
 from soundboost_toolkit.security import (
     PathAccessError,
     email_allowlist_check,
@@ -315,6 +322,40 @@ class EntitlementGateTests(unittest.TestCase):
         with unittest.mock.patch.object(client, "get_billing_info", side_effect=httpx.ConnectError("down")):
             ent = client.require_feature_entitlement("studio_hifi_plus_stems_unlocked")
         self.assertEqual(ent["tier_source"], "unknown")
+
+
+class ReaperLuaSecurityTests(unittest.TestCase):
+    def test_daemon_lua_enforces_action_allowlist_matching_mcp_server(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        daemon_text = (repo_root / "reaper" / "Scripts" / "Suavecito_Live_Bridge_Daemon.lua").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("ExtraActionAllowlist", daemon_text)
+        self.assertIn("rejected_action_not_allowlisted", daemon_text)
+        self.assertIn("pcall(dofile, script_file)", daemon_text)
+
+        match = re.search(r"local\s+allowed_actions\s*=\s*\{([^}]*)\}", daemon_text, re.DOTALL)
+        self.assertIsNotNone(match)
+        assert match is not None
+        daemon_actions = set(re.findall(r'\["([^"]+)"\]\s*=\s*true', match.group(1)))
+        self.assertEqual(daemon_actions, set(DEFAULT_REAPER_ACTION_ALLOWLIST))
+
+        script_map_match = re.search(r"local\s+script_map\s*=\s*\{([^}]*)\}", daemon_text, re.DOTALL)
+        self.assertIsNotNone(script_map_match)
+        assert script_map_match is not None
+        script_map_body = script_map_match.group(1)
+        for script_name in REAPER_AI_LUA_SCRIPTS:
+            self.assertIn(script_name, script_map_body)
+
+    def test_ai_lua_scripts_have_no_hardcoded_user_paths_or_unbounded_exec(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        for script_name in REAPER_AI_LUA_SCRIPTS:
+            text = (repo_root / "reaper" / "Scripts" / script_name).read_text(encoding="utf-8")
+            for forbidden in ("C:\\Users\\", "/Users/", "/home/", "ExecProcess(cmd, 0)"):
+                self.assertNotIn(forbidden, text, f"{script_name} unexpectedly contains {forbidden!r}")
+            self.assertIn("resolve_tool_bin", text)
+            self.assertIn("has_unsafe_arg_chars", text)
+            self.assertIn("exit_code ~= 0", text)
 
 
 if __name__ == "__main__":

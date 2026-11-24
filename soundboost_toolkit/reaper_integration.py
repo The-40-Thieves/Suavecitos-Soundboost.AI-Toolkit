@@ -59,6 +59,13 @@ from soundboost_toolkit.dsp import (
 # ---------------------------------------------------------------------------
 REAPER_DEFAULT_EXE = Path(r"C:\Program Files\REAPER (x64)\reaper.exe")
 
+REAPER_AI_LUA_SCRIPTS: tuple[str, ...] = (
+    "Suavecito_AI_Stem_Split.lua",
+    "Suavecito_Auto_Vocal_Chain.lua",
+    "Suavecito_Vocal_To_MIDI.lua",
+    "Suavecito_Whisper_Dialogue_Markers.lua",
+)
+
 GENRE_PRESET_EQ_CURVES: dict[str, dict[str, Any]] = {
     "pop": {
         "eq_18band_db": [0.5, 1.0, 1.2, 0.8, 0.0, -0.5, -1.2, -0.8, 0.0, 0.4, 0.8, 1.2, 1.6, 1.8, 1.5, 2.0, 2.2, 1.8],
@@ -341,6 +348,9 @@ def inspect_reaper_environment(reaper_resource_dir: str | Path | None = None) ->
             "jsfx_gmem_enabled": jsfx_path.exists() and "gmem=SuavecitoSoundBoost" in jsfx_path.read_text(encoding="utf-8", errors="replace"),
             "live_bridge_daemon_installed": daemon_path.exists(),
             "startup_hook_installed": startup_path.exists() and "Suavecito_Live_Bridge_Daemon.lua" in startup_path.read_text(encoding="utf-8", errors="replace"),
+            "ai_reascripts_installed": {
+                name: (res_dir / "Scripts" / "Suavecito" / name).exists() for name in REAPER_AI_LUA_SCRIPTS
+            },
             "telemetry_file_exists": telemetry_path.exists(),
         },
         "plugin_arsenal": discovered_plugins,
@@ -534,6 +544,8 @@ def install_reaper_assets(
     - `Effects/Suavecito/SoundBoost_18Band_Mastering_EQ_Monitor.jsfx` (`options:gmem=SuavecitoSoundBoost`)
     - `Scripts/Suavecito/Suavecito_SoundBoost_Stem_Import.lua`
     - `Scripts/Suavecito/Suavecito_Live_Bridge_Daemon.lua`
+    - 4 AI workflow ReaScripts (`Suavecito_AI_Stem_Split.lua`, `Suavecito_Auto_Vocal_Chain.lua`,
+      `Suavecito_Vocal_To_MIDI.lua`, `Suavecito_Whisper_Dialogue_Markers.lua`)
     - `Scripts/__startup.lua` hook so REAPER automatically runs the Live Bridge Daemon
     - `VideoPresets/Suavecito_SoundBoost_9x16_Canvas_Visualizer.txt`
     - 12 `.RfxChain` Genre Mastering FX Chains (`FXChains/Suavecito/SoundBoost_<genre>.RfxChain`)
@@ -567,6 +579,12 @@ def install_reaper_assets(
     shutil.copy2(src_jsfx, dst_jsfx)
     shutil.copy2(src_stem_lua, dst_lua)
     shutil.copy2(src_daemon_lua, dst_daemon)
+    installed_ai_reascripts: list[str] = []
+    for script_name in REAPER_AI_LUA_SCRIPTS:
+        src_ai_lua = repo_root / "reaper" / "Scripts" / script_name
+        dst_ai_lua = dst_lua_dir / script_name
+        shutil.copy2(src_ai_lua, dst_ai_lua)
+        installed_ai_reascripts.append(str(dst_ai_lua))
     if src_video_preset.exists():
         shutil.copy2(src_video_preset, dst_video)
 
@@ -609,6 +627,7 @@ def install_reaper_assets(
         "installed_jsfx": str(dst_jsfx),
         "installed_reascript": str(dst_lua),
         "installed_daemon_reascript": str(dst_daemon),
+        "installed_ai_reascripts": installed_ai_reascripts,
         "installed_startup_hook": str(startup_lua),
         "installed_video_preset": str(dst_video),
         "installed_fxchains_count": len(installed_fxchains),

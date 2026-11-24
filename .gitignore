@@ -13,3 +13,4 @@ credentials.json
 .ruff_cache/
 .pytest_cache/
 .claude/state/
+graphify-out/

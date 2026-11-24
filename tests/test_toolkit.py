@@ -41,6 +41,7 @@ from soundboost_toolkit.oauth import (
     get_vault_status,
 )
 from soundboost_toolkit.reaper_integration import (
+    REAPER_AI_LUA_SCRIPTS,
     ReaperLiveBridge,
     build_osc_packet,
     build_reaper_to_shoots_storyboard,
@@ -533,6 +534,9 @@ class SoundBoostToolkitTests(unittest.TestCase):
             self.assertEqual(inst["installed_fxchains_count"], 12)
             self.assertTrue((tmp_path / "Scripts" / "__startup.lua").exists())
             self.assertTrue((tmp_path / "Scripts" / "Suavecito" / "Suavecito_Live_Bridge_Daemon.lua").exists())
+            self.assertEqual(len(inst["installed_ai_reascripts"]), len(REAPER_AI_LUA_SCRIPTS))
+            for script_name in REAPER_AI_LUA_SCRIPTS:
+                self.assertTrue((tmp_path / "Scripts" / "Suavecito" / script_name).exists())
 
             env_info = inspect_reaper_environment(tmp_path)
             self.assertTrue(env_info["ini_bridge_config"]["reascript_enabled"])
@@ -540,6 +544,11 @@ class SoundBoostToolkitTests(unittest.TestCase):
             self.assertTrue(env_info["ini_bridge_config"]["osc_csurf_configured"])
             self.assertTrue(env_info["suavecito_assets"]["jsfx_gmem_enabled"])
             self.assertTrue(env_info["suavecito_assets"]["startup_hook_installed"])
+            self.assertEqual(
+                set(env_info["suavecito_assets"]["ai_reascripts_installed"]),
+                set(REAPER_AI_LUA_SCRIPTS),
+            )
+            self.assertTrue(all(env_info["suavecito_assets"]["ai_reascripts_installed"].values()))
 
             # Create fake stem WAVs (Kick, Snare, Vocals, Bass) and generate .RPP session
             stems_dir = tmp_path / "stems"
